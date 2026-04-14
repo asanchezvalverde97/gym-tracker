@@ -26,6 +26,7 @@ import {
 } from "../lib/start-workout-draft";
 import { getUserSettings } from "../lib/user-settings";
 import {
+  type ActiveSessionBundle,
   clearActiveSession,
   getActiveSession,
   saveActiveSession,
@@ -33,12 +34,15 @@ import {
 import { saveCompletedSession } from "../lib/completed-sessions";
 import {
   addSetToCurrentExercise,
+  createSessionFlowSnapshot,
   createSessionFlowState,
+  createSessionFlowStateFromSnapshot,
   finishEarly,
   getCurrentExercise,
   getCurrentSet,
   getUpcomingExercise,
   getUpcomingSet,
+  isRestPhase,
   next,
   saveSet,
   skipUpcomingSet,
@@ -46,10 +50,13 @@ import {
   updateCurrentSetFeeling,
   updateCurrentSetRest,
   updateCurrentSetWeight,
-  updateNextSetRest,
   type SessionFlowState,
 } from "../lib/session-flow";
-import type { SetFeeling, WorkoutSession } from "../types/workout";
+import type {
+  CompletedWorkoutSession,
+  SetFeeling,
+  WorkoutSession,
+} from "../types/workout";
 
 const feelingOptions: Array<{ value: SetFeeling; label: string }> = [
   { value: 1, label: "Bad" },
@@ -105,13 +112,17 @@ async function createInitialSessionData(
   );
 }
 
-function isValidActiveSessionBundle(value: unknown): value is {
+type LegacyActiveSessionBundle = {
   session: WorkoutSession;
   sessionExercises: SessionFlowState["sessionExercises"];
   workoutSets: SessionFlowState["workoutSets"];
   restStartTimeMs?: number | null;
   restDurationTargetSec?: number | null;
-} {
+};
+
+function isValidActiveSessionBundle(
+  value: unknown,
+): value is ActiveSessionBundle | LegacyActiveSessionBundle {
   if (!value || typeof value !== "object") {
     return false;
   }
@@ -133,6 +144,8 @@ function getRestoredFlowState(bundle: {
   session: WorkoutSession;
   sessionExercises: SessionFlowState["sessionExercises"];
   workoutSets: SessionFlowState["workoutSets"];
+  flow?: ActiveSessionBundle["flow"];
+  rest?: ActiveSessionBundle["rest"];
   restStartTimeMs?: number | null;
   restDurationTargetSec?: number | null;
 }): {
@@ -147,6 +160,29 @@ function getRestoredFlowState(bundle: {
 
   if (bundle.sessionExercises.length === 0 || bundle.workoutSets.length === 0) {
     return null;
+  }
+
+  if ("flow" in bundle && bundle.flow) {
+    const flowState = createSessionFlowStateFromSnapshot(
+      bundle.sessionExercises,
+      bundle.workoutSets,
+      bundle.flow,
+    );
+    const restStartedAtMs = bundle.rest?.startedAt
+      ? new Date(bundle.rest.startedAt).getTime()
+      : null;
+
+    return {
+      flowState,
+      restStartTimeMs: restStartedAtMs,
+      restDurationTargetSec: bundle.rest?.targetDurationSec ?? null,
+      restEndTimeMs:
+        bundle.rest?.endsAt != null
+          ? new Date(bundle.rest.endsAt).getTime()
+          : restStartedAtMs != null && bundle.rest?.targetDurationSec != null
+            ? restStartedAtMs + bundle.rest.targetDurationSec * 1000
+            : null,
+    };
   }
 
   const hasRestStart = bundle.restStartTimeMs != null;
@@ -205,19 +241,68 @@ function getRestoredFlowState(bundle: {
   }
 
   const currentPosition = flatSets[firstIncompleteIndex];
-  const status = hasRestStart ? "resting" : "active";
+  const orderedExercise = orderedExercises[currentPosition.exerciseIndex];
+  const currentSet = bundle.workoutSets
+    .filter((set) => set.sessionExerciseId === orderedExercise.id)
+    .sort((a, b) => a.setNumber - b.setNumber)[currentPosition.setIndex];
+
+  if (!orderedExercise || !currentSet) {
+    return null;
+  }
 
   return {
-    flowState: {
-      ...createSessionFlowState(bundle.sessionExercises, bundle.workoutSets, status),
-      currentExerciseIndex: currentPosition.exerciseIndex,
-      currentSetIndex: currentPosition.setIndex,
-    },
+    flowState: createSessionFlowStateFromSnapshot(
+      bundle.sessionExercises,
+      bundle.workoutSets,
+      {
+        phase: hasRestStart ? "rest" : "in_set",
+        currentExerciseId: orderedExercise.id,
+        currentSetId: currentSet.id,
+      },
+    ),
     restStartTimeMs: bundle.restStartTimeMs ?? null,
     restDurationTargetSec: bundle.restDurationTargetSec ?? null,
     restEndTimeMs:
       bundle.restStartTimeMs != null && bundle.restDurationTargetSec != null
         ? bundle.restStartTimeMs + bundle.restDurationTargetSec * 1000
+        : null,
+  };
+}
+
+function getActiveSessionBundle(
+  session: WorkoutSession,
+  flowState: SessionFlowState,
+  restStartTimeMs: number | null,
+  restDurationTargetSec: number | null,
+): ActiveSessionBundle | null {
+  if (session.kind !== "active" || session.endedAt != null) {
+    return null;
+  }
+
+  const flow = createSessionFlowSnapshot(flowState);
+
+  if (!flow) {
+    return null;
+  }
+
+  return {
+    kind: "active_session",
+    session,
+    sessionExercises: flowState.sessionExercises,
+    workoutSets: flowState.workoutSets,
+    flow,
+    rest:
+      isRestPhase(flowState.phase) &&
+      restStartTimeMs != null &&
+      restDurationTargetSec != null &&
+      flowState.currentSetId != null
+        ? {
+            interpretation: "after_completed_set",
+            setId: flowState.currentSetId,
+            startedAt: new Date(restStartTimeMs).toISOString(),
+            targetDurationSec: restDurationTargetSec,
+            endsAt: new Date(restStartTimeMs + restDurationTargetSec * 1000).toISOString(),
+          }
         : null,
   };
 }
@@ -724,7 +809,7 @@ export default function SessionScreen() {
             ? createSessionFlowState(
                 initialSessionData.sessionExercises,
                 initialSessionData.workoutSets,
-                "active",
+                "in_set",
               )
             : null,
         );
@@ -754,7 +839,7 @@ export default function SessionScreen() {
                 ? createSessionFlowState(
                     initialSessionData.sessionExercises,
                     initialSessionData.workoutSets,
-                    "active",
+                    "in_set",
                   )
                 : null,
             );
@@ -769,7 +854,7 @@ export default function SessionScreen() {
               ? createSessionFlowState(
                   initialSessionData.sessionExercises,
                   initialSessionData.workoutSets,
-                  "active",
+                  "in_set",
                 )
               : null,
           );
@@ -826,30 +911,30 @@ export default function SessionScreen() {
   }, [currentExercise?.id, currentSet?.id]);
 
   useEffect(() => {
-      if (flowState?.status !== "resting" && !isFinalFeelingOverlay) {
-        setRestStartTimeMs(null);
-        setRestDurationTargetSec(null);
-        setRestEndTimeMs(null);
-        setShowFeelingOverlay(false);
-        setShowNextTransition(false);
-        hasStartedNextTransitionRef.current = false;
-        hasAdvancedRestRef.current = false;
-        hasPlayedRestCompleteRef.current = false;
-        return;
-      }
+    if (!isRestPhase(flowState?.phase ?? "finished") && !isFinalFeelingOverlay) {
+      setRestStartTimeMs(null);
+      setRestDurationTargetSec(null);
+      setRestEndTimeMs(null);
+      setShowFeelingOverlay(false);
+      setShowNextTransition(false);
+      hasStartedNextTransitionRef.current = false;
+      hasAdvancedRestRef.current = false;
+      hasPlayedRestCompleteRef.current = false;
+      return;
+    }
 
     if (restStartTimeMs != null && restDurationTargetSec != null) {
       setRestEndTimeMs(restStartTimeMs + restDurationTargetSec * 1000);
       setNowMs(Date.now());
     }
 
-      hasAdvancedRestRef.current = false;
-      hasPlayedRestCompleteRef.current = false;
-      setShowNextTransition(false);
-      hasStartedNextTransitionRef.current = false;
-    }, [
-      flowState?.status,
-      currentSet?.id,
+    hasAdvancedRestRef.current = false;
+    hasPlayedRestCompleteRef.current = false;
+    setShowNextTransition(false);
+    hasStartedNextTransitionRef.current = false;
+  }, [
+    flowState?.phase,
+    currentSet?.id,
     currentSet?.restSecTarget,
     isFinalFeelingOverlay,
     restDurationTargetSec,
@@ -857,12 +942,12 @@ export default function SessionScreen() {
   ]);
 
   useEffect(() => {
-    if (flowState?.status !== "resting") {
+    if (!isRestPhase(flowState?.phase ?? "finished")) {
       return;
     }
 
     setRestPhrase(getRandomRestPhrase());
-  }, [flowState?.status, currentSet?.id]);
+  }, [flowState?.phase, currentSet?.id]);
 
   useEffect(() => {
     if (!showFeelingOverlay) {
@@ -903,7 +988,7 @@ export default function SessionScreen() {
         return;
       }
 
-      if (currentFlowState.status === "finished" || currentSession.endedAt != null) {
+      if (currentFlowState.phase === "finished" || currentSession.endedAt != null) {
         void clearActiveSession();
         return;
       }
@@ -912,21 +997,23 @@ export default function SessionScreen() {
       const currentRestStartTimeMs = restStartTimeMsRef.current;
       const currentRestDurationTargetSec = restDurationTargetSecRef.current;
       const actualRestSec =
-        currentFlowState.status === "resting" && currentRestStartTimeMs != null
+        isRestPhase(currentFlowState.phase) && currentRestStartTimeMs != null
           ? Math.max(0, Math.round((now - currentRestStartTimeMs) / 1000))
           : null;
       const flowStateToPersist =
         actualRestSec == null
           ? currentFlowState
           : updateCurrentSetActualRest(currentFlowState, actualRestSec);
+      const bundle = getActiveSessionBundle(
+        currentSession,
+        flowStateToPersist,
+        currentRestStartTimeMs,
+        currentRestDurationTargetSec,
+      );
 
-      void saveActiveSession({
-        session: currentSession,
-        sessionExercises: flowStateToPersist.sessionExercises,
-        workoutSets: flowStateToPersist.workoutSets,
-        restStartTimeMs: currentRestStartTimeMs,
-        restDurationTargetSec: currentRestDurationTargetSec,
-      });
+      if (bundle) {
+        void saveActiveSession(bundle);
+      }
     });
 
     return () => subscription.remove();
@@ -934,7 +1021,7 @@ export default function SessionScreen() {
 
   useEffect(() => {
     if (
-      flowState?.status !== "resting" ||
+      !isRestPhase(flowState?.phase ?? "finished") ||
       restEndTimeMs == null ||
       hasStartedNextTransitionRef.current
     ) {
@@ -965,14 +1052,14 @@ export default function SessionScreen() {
       }
     };
   }, [
-    flowState?.status,
+    flowState?.phase,
     remainingRestMs,
     restEndTimeMs,
   ]);
 
   useEffect(() => {
     if (
-      flowState?.status !== "resting" ||
+      !isRestPhase(flowState?.phase ?? "finished") ||
       remainingRestSec !== 0 ||
       hasStartedNextTransitionRef.current ||
       hasAdvancedRestRef.current
@@ -986,17 +1073,18 @@ export default function SessionScreen() {
     }
 
     startNextTransition();
-  }, [flowState?.status, remainingRestSec]);
+  }, [flowState?.phase, remainingRestSec]);
 
   useEffect(() => {
-    if (flowState?.status !== "finished" || !session || hasSavedCompletedSessionRef.current) {
+    if (flowState?.phase !== "finished" || !session || hasSavedCompletedSessionRef.current) {
       return;
     }
 
     hasSavedCompletedSessionRef.current = true;
 
-    const completedSession: WorkoutSession = {
+    const completedSession: CompletedWorkoutSession = {
       ...session,
+      kind: "completed",
       endedAt: session.endedAt ?? new Date().toISOString(),
     };
 
@@ -1009,7 +1097,7 @@ export default function SessionScreen() {
       );
       await clearActiveSession();
     })();
-  }, [flowState?.status, flowState?.sessionExercises, flowState?.workoutSets, session]);
+  }, [flowState?.phase, flowState?.sessionExercises, flowState?.workoutSets, session]);
 
   function handleCurrentWeightChange(value: number) {
     const nextValue = clamp(value, 0, 60);
@@ -1028,7 +1116,7 @@ export default function SessionScreen() {
   }
 
   function handleDonePress() {
-    if (!flowState || !currentSet || flowState.status !== "active") {
+    if (!flowState || !currentSet || flowState.phase !== "in_set") {
       return;
     }
 
@@ -1042,30 +1130,28 @@ export default function SessionScreen() {
     const now = Date.now();
 
     if (isFinalSet) {
-      const nextActiveState = {
+      const nextInSetState: SessionFlowState = {
         ...nextState,
-        status: "active" as const,
+        phase: "in_set",
       };
 
-      setFlowState(nextActiveState);
+      setFlowState(nextInSetState);
       setRestStartTimeMs(null);
       setRestDurationTargetSec(null);
-        setRestEndTimeMs(null);
-        setNowMs(now);
-        setIsFinalFeelingOverlay(true);
-        setShowNextTransition(false);
-        hasStartedNextTransitionRef.current = false;
-        hasAdvancedRestRef.current = false;
-        hasPlayedRestCompleteRef.current = false;
-        setShowFeelingOverlay(true);
+      setRestEndTimeMs(null);
+      setNowMs(now);
+      setIsFinalFeelingOverlay(true);
+      setShowNextTransition(false);
+      hasStartedNextTransitionRef.current = false;
+      hasAdvancedRestRef.current = false;
+      hasPlayedRestCompleteRef.current = false;
+      setShowFeelingOverlay(true);
       if (session) {
-        void saveActiveSession({
-          session,
-          sessionExercises: nextActiveState.sessionExercises,
-          workoutSets: nextActiveState.workoutSets,
-          restStartTimeMs: null,
-          restDurationTargetSec: null,
-        });
+        const bundle = getActiveSessionBundle(session, nextInSetState, null, null);
+
+        if (bundle) {
+          void saveActiveSession(bundle);
+        }
       }
       return;
     }
@@ -1086,13 +1172,11 @@ export default function SessionScreen() {
     setRestPhrase(getRandomRestPhrase());
     setShowFeelingOverlay(true);
     if (session) {
-      void saveActiveSession({
-        session,
-        sessionExercises: nextState.sessionExercises,
-        workoutSets: nextState.workoutSets,
-        restStartTimeMs: now,
-        restDurationTargetSec: restDurationSec,
-      });
+      const bundle = getActiveSessionBundle(session, nextState, now, restDurationSec);
+
+      if (bundle) {
+        void saveActiveSession(bundle);
+      }
     }
   }
 
@@ -1105,7 +1189,7 @@ export default function SessionScreen() {
           return current;
         }
 
-        return next(updateCurrentSetFeeling({ ...current, status: "resting" }, feeling));
+        return next(updateCurrentSetFeeling({ ...current, phase: "rest" }, feeling));
       });
       setIsFinalFeelingOverlay(false);
       setShowFeelingOverlay(false);
@@ -1152,14 +1236,12 @@ export default function SessionScreen() {
     hasStartedNextTransitionRef.current = false;
     hasAdvancedRestRef.current = false;
     setFlowState(nextFlowState);
-    if (session && nextFlowState.status !== "finished") {
-      void saveActiveSession({
-        session,
-        sessionExercises: nextFlowState.sessionExercises,
-        workoutSets: nextFlowState.workoutSets,
-        restStartTimeMs: null,
-        restDurationTargetSec: null,
-      });
+    if (session && nextFlowState.phase !== "finished") {
+      const bundle = getActiveSessionBundle(session, nextFlowState, null, null);
+
+      if (bundle) {
+        void saveActiveSession(bundle);
+      }
     }
   }
 
@@ -1185,8 +1267,7 @@ export default function SessionScreen() {
         return currentFlow;
       }
 
-      const withCurrentRest = updateCurrentSetRest(currentFlow, nextDurationTargetSec);
-      return updateNextSetRest(withCurrentRest, nextDurationTargetSec);
+      return updateCurrentSetRest(currentFlow, nextDurationTargetSec);
     });
   }
 
@@ -1206,13 +1287,16 @@ export default function SessionScreen() {
     const nextFlowState = skipUpcomingSet(flowState);
 
     setFlowState(nextFlowState);
-    void saveActiveSession({
+    const bundle = getActiveSessionBundle(
       session,
-      sessionExercises: nextFlowState.sessionExercises,
-      workoutSets: nextFlowState.workoutSets,
+      nextFlowState,
       restStartTimeMs,
       restDurationTargetSec,
-    });
+    );
+
+    if (bundle) {
+      void saveActiveSession(bundle);
+    }
   }
 
   function handleAddSet() {
@@ -1223,13 +1307,16 @@ export default function SessionScreen() {
     const nextFlowState = addSetToCurrentExercise(flowState);
 
     setFlowState(nextFlowState);
-    void saveActiveSession({
+    const bundle = getActiveSessionBundle(
       session,
-      sessionExercises: nextFlowState.sessionExercises,
-      workoutSets: nextFlowState.workoutSets,
+      nextFlowState,
       restStartTimeMs,
       restDurationTargetSec,
-    });
+    );
+
+    if (bundle) {
+      void saveActiveSession(bundle);
+    }
   }
 
   function handleFinishEarly() {
@@ -1260,8 +1347,9 @@ export default function SessionScreen() {
 
     isFinalizingSessionRef.current = true;
 
-    const completedSession: WorkoutSession = {
+    const completedSession: CompletedWorkoutSession = {
       ...session,
+      kind: "completed",
       endedAt: session.endedAt ?? new Date().toISOString(),
       feeling: sessionFeeling,
       notes: sessionNotes.trim() || null,
@@ -1297,7 +1385,7 @@ export default function SessionScreen() {
     nowMs,
   );
 
-  if (flowState.status === "finished" || !currentExercise || !currentSet) {
+  if (flowState.phase === "finished" || !currentExercise || !currentSet) {
     return (
       <View style={styles.container}>
         <View style={styles.completionScreen}>
@@ -1368,7 +1456,7 @@ export default function SessionScreen() {
     ? getExerciseDisplayName(upcomingExercise.exerciseId)
     : "Finish";
 
-  if (flowState.status === "resting") {
+  if (isRestPhase(flowState.phase)) {
     return (
       <View style={styles.container}>
           <View style={styles.restScreen}>

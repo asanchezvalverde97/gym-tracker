@@ -32,6 +32,30 @@ function createWorkoutSet(overrides: Partial<WorkoutSet> = {}): WorkoutSet {
     sessionExerciseId: "exercise-1",
     setNumber: 1,
     metricType: "reps",
+    status: "pending",
+    plan: {
+      repsMin: 8,
+      repsMax: 12,
+      durationSec: null,
+      weightKg: null,
+      restSec: 90,
+      variant: "normal",
+    },
+    performed: {
+      reps: null,
+      durationSec: null,
+      weightKg: null,
+      feeling: null,
+    },
+    rest: {
+      targetSec: 90,
+      actualSec: null,
+      startedAt: null,
+      endedAt: null,
+    },
+    createdAt: "2026-04-13T10:00:00.000Z",
+    completedAt: null,
+    skippedAt: null,
     variant: "normal",
     reps: null,
     durationSec: null,
@@ -39,8 +63,6 @@ function createWorkoutSet(overrides: Partial<WorkoutSet> = {}): WorkoutSet {
     restSecTarget: 90,
     restSecActual: null,
     feeling: null,
-    completedAt: null,
-    createdAt: "2026-04-13T10:00:00.000Z",
     ...overrides,
   };
 }
@@ -49,7 +71,7 @@ function createState(
   options: {
     sessionExercises?: SessionExercise[];
     workoutSets?: WorkoutSet[];
-    status?: SessionFlowState["status"];
+    status?: SessionFlowState["phase"];
   } = {},
 ): SessionFlowState {
   return createSessionFlowState(
@@ -59,7 +81,7 @@ function createState(
         createWorkoutSet({ id: "set-1", setNumber: 1 }),
         createWorkoutSet({ id: "set-2", setNumber: 2 }),
       ],
-    options.status ?? "active",
+    options.status ?? "in_set",
   );
 }
 
@@ -76,52 +98,52 @@ function test(name: string, run: () => void) {
 test("createSessionFlowState returns finished when there are no session exercises", () => {
   const state = createSessionFlowState([], []);
 
-  assert.equal(state.status, "finished");
+  assert.equal(state.phase, "finished");
 });
 
-test("saveSet marks the current set as completed and changes status to resting", () => {
+test("saveSet marks the current set as completed and changes phase to rest", () => {
   const state = createState();
 
   const nextState = saveSet(state, { reps: 10 });
   const currentSet = getCurrentSet(nextState);
 
-  assert.equal(nextState.status, "resting");
+  assert.equal(nextState.phase, "rest");
   assert.equal(currentSet?.id, "set-1");
   assert.equal(currentSet?.reps, 10);
   assert.equal(typeof currentSet?.completedAt, "string");
 });
 
-test("saveSet does nothing when status is resting", () => {
-  const state = createState({ status: "resting" });
+test("saveSet does nothing when phase is rest", () => {
+  const state = createState({ status: "rest" as SessionFlowState["phase"] });
 
   const nextState = saveSet(state, { reps: 10 });
 
   assert.equal(nextState, state);
 });
 
-test("next moves to the next set and changes status back to active", () => {
-  const state = createState({ status: "resting" });
+test("next moves to the next set and changes phase back to in_set", () => {
+  const state = createState({ status: "rest" as SessionFlowState["phase"] });
 
   const nextState = next(state);
   const currentSet = getCurrentSet(nextState);
 
-  assert.equal(nextState.status, "active");
-  assert.equal(nextState.currentSetIndex, 1);
+  assert.equal(nextState.phase, "in_set");
+  assert.equal(nextState.currentSetId, "set-2");
   assert.equal(currentSet?.id, "set-2");
 });
 
-test("next changes status to finished when there is no upcoming set", () => {
+test("next changes phase to finished when there is no upcoming set", () => {
   const state = createState({
     workoutSets: [createWorkoutSet({ id: "set-1", setNumber: 1 })],
-    status: "resting",
+    status: "rest" as SessionFlowState["phase"],
   });
 
   const nextState = next(state);
 
-  assert.equal(nextState.status, "finished");
+  assert.equal(nextState.phase, "finished");
 });
 
-test("next moves from the last set of one exercise to the first set of the next exercise", () => {
+test("saveSet enters between_exercises when the next pending set belongs to another exercise", () => {
   const sessionExercises = [
     createSessionExercise({ id: "exercise-1", order: 1, targetSets: 2 }),
     createSessionExercise({
@@ -136,24 +158,19 @@ test("next moves from the last set of one exercise to the first set of the next 
     createWorkoutSet({ id: "set-2", sessionExerciseId: "exercise-1", setNumber: 2 }),
     createWorkoutSet({ id: "set-3", sessionExerciseId: "exercise-2", setNumber: 1 }),
   ];
-  const state = {
-    ...createSessionFlowState(sessionExercises, workoutSets, "resting"),
-    currentExerciseIndex: 0,
-    currentSetIndex: 1,
-  };
+  const state = createSessionFlowState(sessionExercises, workoutSets, "in_set");
+  const completedFirst = saveSet(state, { reps: 10 });
+  const completedSecond = next(completedFirst);
+  const afterSecondSave = saveSet(completedSecond, { reps: 10 });
 
-  const nextState = next(state);
-  const currentSet = getCurrentSet(nextState);
-
-  assert.equal(nextState.status, "active");
-  assert.equal(nextState.currentExerciseIndex, 1);
-  assert.equal(nextState.currentSetIndex, 0);
-  assert.equal(currentSet?.id, "set-3");
+  assert.equal(afterSecondSave.phase, "between_exercises");
+  assert.equal(afterSecondSave.currentSetId, "set-2");
+  assert.equal(getCurrentSet(afterSecondSave)?.id, "set-2");
 });
 
-test("updateCurrentSetFeeling only works while status is resting", () => {
-  const activeState = createState({ status: "active" });
-  const restingState = createState({ status: "resting" });
+test("updateCurrentSetFeeling only works while phase is rest-like", () => {
+  const activeState = createState({ status: "in_set" });
+  const restingState = createState({ status: "rest" as SessionFlowState["phase"] });
 
   const activeNextState = updateCurrentSetFeeling(activeState, 4);
   const restingNextState = updateCurrentSetFeeling(restingState, 4);

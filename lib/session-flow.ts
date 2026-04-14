@@ -2,15 +2,21 @@ import type {
   SetFeeling,
   SetVariant,
   SessionExercise,
+  WorkoutSetPerformance,
+  WorkoutSetPlan,
+  WorkoutSetRest,
   WorkoutSet,
 } from "../types/workout";
+import type { ActiveSessionFlowSnapshot } from "./active-session";
+
+export type SessionFlowPhase = "in_set" | "rest" | "between_exercises" | "finished";
 
 export interface SessionFlowState {
   sessionExercises: SessionExercise[];
   workoutSets: WorkoutSet[];
-  currentExerciseIndex: number;
-  currentSetIndex: number;
-  status: "active" | "resting" | "finished";
+  currentExerciseId: string | null;
+  currentSetId: string | null;
+  phase: SessionFlowPhase;
 }
 
 interface SaveSetInput {
@@ -49,56 +55,132 @@ function updateWorkoutSet(
   return workoutSets.map((set) => (set.id === setId ? updater(set) : set));
 }
 
-function isSetUnavailable(set: WorkoutSet): boolean {
-  return set.completedAt != null || set.skippedAt != null;
-}
+function createUpdatedWorkoutSet(
+  set: WorkoutSet,
+  updates: Partial<Omit<WorkoutSet, "plan" | "performed" | "rest">> & {
+    plan?: Partial<WorkoutSetPlan>;
+    performed?: Partial<WorkoutSetPerformance>;
+    rest?: Partial<WorkoutSetRest>;
+  },
+): WorkoutSet {
+  const nextStatus =
+    updates.status ??
+    (updates.completedAt != null
+      ? "completed"
+      : updates.skippedAt != null
+        ? "skipped"
+        : set.status);
+  const nextCompletedAt = updates.completedAt ?? set.completedAt;
+  const nextSkippedAt = updates.skippedAt ?? set.skippedAt;
+  const nextVariant = updates.variant ?? set.variant;
+  const nextReps = updates.reps ?? set.reps ?? null;
+  const nextDurationSec = updates.durationSec ?? set.durationSec ?? null;
+  const nextWeightKg = updates.weightKg ?? set.weightKg ?? null;
+  const nextFeeling = updates.feeling ?? set.feeling ?? null;
+  const nextRestTarget =
+    updates.restSecTarget ?? set.restSecTarget ?? set.rest.targetSec ?? null;
+  const nextRestActual =
+    updates.restSecActual ?? set.restSecActual ?? set.rest.actualSec ?? null;
+  const nextRestStartedAt =
+    updates.rest?.startedAt ?? set.rest.startedAt ?? null;
+  const nextRestEndedAt =
+    updates.rest?.endedAt ?? set.rest.endedAt ?? null;
+  const nextPerformedWeight =
+    updates.performed?.weightKg ?? nextWeightKg;
+  const nextPerformedFeeling =
+    updates.performed?.feeling ?? nextFeeling;
 
-export function createSessionFlowState(
-  sessionExercises: SessionExercise[],
-  workoutSets: WorkoutSet[],
-  status: SessionFlowState["status"] = "active",
-): SessionFlowState {
   return {
-    sessionExercises: getOrderedSessionExercises(sessionExercises),
-    workoutSets: [...workoutSets],
-    currentExerciseIndex: 0,
-    currentSetIndex: 0,
-    status: sessionExercises.length === 0 ? "finished" : status,
+    ...set,
+    ...updates,
+    status: nextStatus,
+    plan: {
+      ...set.plan,
+      ...(updates.plan ?? {}),
+      variant: updates.plan?.variant ?? nextVariant,
+      weightKg: updates.plan?.weightKg ?? nextWeightKg,
+      restSec: updates.plan?.restSec ?? nextRestTarget,
+    },
+    performed: {
+      ...set.performed,
+      ...(updates.performed ?? {}),
+      reps:
+        updates.performed?.reps ??
+        (Object.prototype.hasOwnProperty.call(updates, "reps") ? nextReps : set.performed.reps) ??
+        null,
+      durationSec:
+        updates.performed?.durationSec ??
+        (Object.prototype.hasOwnProperty.call(updates, "durationSec")
+          ? nextDurationSec
+          : set.performed.durationSec) ??
+        null,
+      weightKg: nextPerformedWeight,
+      feeling: nextPerformedFeeling,
+    },
+    rest: {
+      ...set.rest,
+      ...(updates.rest ?? {}),
+      targetSec: updates.rest?.targetSec ?? nextRestTarget,
+      actualSec: updates.rest?.actualSec ?? nextRestActual,
+      startedAt: nextRestStartedAt,
+      endedAt: nextRestEndedAt,
+    },
+    variant: nextVariant,
+    reps: nextReps,
+    durationSec: nextDurationSec,
+    weightKg: nextWeightKg,
+    restSecTarget: nextRestTarget,
+    restSecActual: nextRestActual,
+    feeling: nextFeeling,
+    completedAt: nextCompletedAt,
+    skippedAt: nextSkippedAt,
   };
 }
 
-export function getCurrentExercise(
+function isSetUnavailable(set: WorkoutSet): boolean {
+  return set.status !== "pending" || set.completedAt != null || set.skippedAt != null;
+}
+
+function getSetPositionById(state: SessionFlowState): SetPosition | null {
+  if (!state.currentExerciseId || !state.currentSetId) {
+    return null;
+  }
+
+  const exerciseIndex = state.sessionExercises.findIndex(
+    (exercise) => exercise.id === state.currentExerciseId,
+  );
+
+  if (exerciseIndex === -1) {
+    return null;
+  }
+
+  const sets = getExerciseSets(state.workoutSets, state.currentExerciseId);
+  const setIndex = sets.findIndex((set) => set.id === state.currentSetId);
+
+  if (setIndex === -1) {
+    return null;
+  }
+
+  return { exerciseIndex, setIndex };
+}
+
+function findNextPendingPosition(
   state: SessionFlowState,
-): SessionExercise | null {
-  if (state.status === "finished") {
-    return null;
-  }
+  fromPosition: SetPosition | null,
+): SetPosition | null {
+  const startExerciseIndex = fromPosition?.exerciseIndex ?? 0;
 
-  return state.sessionExercises[state.currentExerciseIndex] ?? null;
-}
-
-export function getCurrentSet(state: SessionFlowState): WorkoutSet | null {
-  const currentExercise = getCurrentExercise(state);
-
-  if (!currentExercise) {
-    return null;
-  }
-
-  const sets = getExerciseSets(state.workoutSets, currentExercise.id);
-
-  return sets[state.currentSetIndex] ?? null;
-}
-
-function getUpcomingPosition(state: SessionFlowState): SetPosition | null {
   for (
-    let exerciseIndex = state.currentExerciseIndex;
+    let exerciseIndex = startExerciseIndex;
     exerciseIndex < state.sessionExercises.length;
     exerciseIndex += 1
   ) {
     const exercise = state.sessionExercises[exerciseIndex];
     const sets = getExerciseSets(state.workoutSets, exercise.id);
     const startSetIndex =
-      exerciseIndex === state.currentExerciseIndex ? state.currentSetIndex + 1 : 0;
+      fromPosition != null && exerciseIndex === fromPosition.exerciseIndex
+        ? fromPosition.setIndex + 1
+        : 0;
 
     for (let setIndex = startSetIndex; setIndex < sets.length; setIndex += 1) {
       if (!isSetUnavailable(sets[setIndex])) {
@@ -113,29 +195,159 @@ function getUpcomingPosition(state: SessionFlowState): SetPosition | null {
   return null;
 }
 
+function findFirstPendingPosition(state: SessionFlowState): SetPosition | null {
+  return findNextPendingPosition(state, null);
+}
+
+function getSetAtPosition(
+  state: SessionFlowState,
+  position: SetPosition | null,
+): WorkoutSet | null {
+  if (!position) {
+    return null;
+  }
+
+  const exercise = state.sessionExercises[position.exerciseIndex];
+
+  if (!exercise) {
+    return null;
+  }
+
+  const sets = getExerciseSets(state.workoutSets, exercise.id);
+  return sets[position.setIndex] ?? null;
+}
+
+function getExerciseAtPosition(
+  state: SessionFlowState,
+  position: SetPosition | null,
+): SessionExercise | null {
+  if (!position) {
+    return null;
+  }
+
+  return state.sessionExercises[position.exerciseIndex] ?? null;
+}
+
+function getNextPendingPosition(state: SessionFlowState): SetPosition | null {
+  return findNextPendingPosition(state, getSetPositionById(state));
+}
+
+function createCursorState(
+  state: SessionFlowState,
+  position: SetPosition | null,
+  phase: SessionFlowPhase,
+): SessionFlowState {
+  const exercise = getExerciseAtPosition(state, position);
+  const set = getSetAtPosition(state, position);
+
+  return {
+    ...state,
+    currentExerciseId: exercise?.id ?? null,
+    currentSetId: set?.id ?? null,
+    phase,
+  };
+}
+
+function getRestPhaseForCurrentSet(state: SessionFlowState): Extract<
+  SessionFlowPhase,
+  "rest" | "between_exercises"
+> {
+  const currentPosition = getSetPositionById(state);
+  const upcomingPosition = getNextPendingPosition(state);
+
+  if (
+    currentPosition &&
+    upcomingPosition &&
+    upcomingPosition.exerciseIndex !== currentPosition.exerciseIndex
+  ) {
+    return "between_exercises";
+  }
+
+  return "rest";
+}
+
+export function isRestPhase(
+  phase: SessionFlowPhase,
+): phase is "rest" | "between_exercises" {
+  return phase === "rest" || phase === "between_exercises";
+}
+
+export function createSessionFlowState(
+  sessionExercises: SessionExercise[],
+  workoutSets: WorkoutSet[],
+  phase: SessionFlowPhase = "in_set",
+): SessionFlowState {
+  const orderedExercises = getOrderedSessionExercises(sessionExercises);
+  const baseState: SessionFlowState = {
+    sessionExercises: orderedExercises,
+    workoutSets: [...workoutSets],
+    currentExerciseId: null,
+    currentSetId: null,
+    phase: "finished",
+  };
+  const firstPendingPosition = findFirstPendingPosition(baseState);
+
+  if (!firstPendingPosition) {
+    return baseState;
+  }
+
+  return createCursorState(baseState, firstPendingPosition, phase);
+}
+
+export function createSessionFlowStateFromSnapshot(
+  sessionExercises: SessionExercise[],
+  workoutSets: WorkoutSet[],
+  snapshot: ActiveSessionFlowSnapshot,
+): SessionFlowState {
+  const baseState: SessionFlowState = {
+    sessionExercises: getOrderedSessionExercises(sessionExercises),
+    workoutSets: [...workoutSets],
+    currentExerciseId: snapshot.currentExerciseId,
+    currentSetId: snapshot.currentSetId,
+    phase: snapshot.phase,
+  };
+
+  return getSetPositionById(baseState)
+    ? baseState
+    : createSessionFlowState(sessionExercises, workoutSets, snapshot.phase);
+}
+
+export function createSessionFlowSnapshot(
+  state: SessionFlowState,
+): ActiveSessionFlowSnapshot | null {
+  if (
+    state.phase === "finished" ||
+    !state.currentExerciseId ||
+    !state.currentSetId
+  ) {
+    return null;
+  }
+
+  return {
+    phase: state.phase,
+    currentExerciseId: state.currentExerciseId,
+    currentSetId: state.currentSetId,
+  };
+}
+
+export function getCurrentExercise(
+  state: SessionFlowState,
+): SessionExercise | null {
+  return getExerciseAtPosition(state, getSetPositionById(state));
+}
+
+export function getCurrentSet(state: SessionFlowState): WorkoutSet | null {
+  return getSetAtPosition(state, getSetPositionById(state));
+}
+
 export function getUpcomingExercise(
   state: SessionFlowState,
 ): SessionExercise | null {
-  const upcomingPosition = getUpcomingPosition(state);
-
-  if (!upcomingPosition) {
-    return null;
-  }
-
-  return state.sessionExercises[upcomingPosition.exerciseIndex] ?? null;
+  return getExerciseAtPosition(state, getNextPendingPosition(state));
 }
 
 export function getUpcomingSet(state: SessionFlowState): WorkoutSet | null {
-  const upcomingPosition = getUpcomingPosition(state);
-
-  if (!upcomingPosition) {
-    return null;
-  }
-
-  const upcomingExercise = state.sessionExercises[upcomingPosition.exerciseIndex];
-  const sets = getExerciseSets(state.workoutSets, upcomingExercise.id);
-
-  return sets[upcomingPosition.setIndex] ?? null;
+  return getSetAtPosition(state, getNextPendingPosition(state));
 }
 
 export function updateCurrentSetWeight(
@@ -150,10 +362,12 @@ export function updateCurrentSetWeight(
 
   return {
     ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) => ({
-      ...set,
-      weightKg,
-    })),
+    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) =>
+      createUpdatedWorkoutSet(set, {
+        weightKg,
+        plan: { weightKg },
+      }),
+    ),
   };
 }
 
@@ -169,10 +383,13 @@ export function updateCurrentSetRest(
 
   return {
     ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) => ({
-      ...set,
-      restSecTarget,
-    })),
+    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) =>
+      createUpdatedWorkoutSet(set, {
+        restSecTarget,
+        plan: { restSec: restSecTarget },
+        rest: { targetSec: restSecTarget },
+      }),
+    ),
   };
 }
 
@@ -186,12 +403,20 @@ export function updateCurrentSetActualRest(
     return state;
   }
 
+  const restEndedAt = isRestPhase(state.phase) ? new Date().toISOString() : null;
+
   return {
     ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) => ({
-      ...set,
-      restSecActual,
-    })),
+    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) =>
+      createUpdatedWorkoutSet(set, {
+        restSecActual,
+        rest: {
+          actualSec: restSecActual,
+          startedAt: set.rest.startedAt ?? set.completedAt,
+          endedAt: restEndedAt,
+        },
+      }),
+    ),
   };
 }
 
@@ -199,7 +424,7 @@ export function updateCurrentSetFeeling(
   state: SessionFlowState,
   feeling: SetFeeling | null,
 ): SessionFlowState {
-  if (state.status !== "resting") {
+  if (!isRestPhase(state.phase)) {
     return state;
   }
 
@@ -211,10 +436,12 @@ export function updateCurrentSetFeeling(
 
   return {
     ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) => ({
-      ...set,
-      feeling,
-    })),
+    workoutSets: updateWorkoutSet(state.workoutSets, currentSet.id, (set) =>
+      createUpdatedWorkoutSet(set, {
+        feeling,
+        performed: { feeling },
+      }),
+    ),
   };
 }
 
@@ -222,22 +449,21 @@ export function saveSet(
   state: SessionFlowState,
   input: SaveSetInput,
 ): SessionFlowState {
-  if (state.status === "resting") {
+  if (isRestPhase(state.phase)) {
     return state;
   }
 
   const currentSet = getCurrentSet(state);
 
-  if (!currentSet || state.status === "finished") {
+  if (!currentSet || state.phase === "finished") {
     return state;
   }
 
+  const completedAt = new Date().toISOString();
   const nextWorkoutSets = updateWorkoutSet(state.workoutSets, currentSet.id, (set) => {
-    const completedAt = new Date().toISOString();
-
     if (set.metricType === "reps") {
-      return {
-        ...set,
+      return createUpdatedWorkoutSet(set, {
+        status: "completed",
         reps: input.reps ?? null,
         durationSec: null,
         feeling: input.feeling ?? null,
@@ -245,11 +471,23 @@ export function saveSet(
         variant: input.variant ?? set.variant,
         completedAt,
         skippedAt: null,
-      };
+        performed: {
+          reps: input.reps ?? null,
+          durationSec: null,
+          weightKg: input.weightKg ?? set.weightKg ?? null,
+          feeling: input.feeling ?? null,
+        },
+        rest: {
+          targetSec: set.rest.targetSec ?? set.restSecTarget ?? null,
+          actualSec: null,
+          startedAt: completedAt,
+          endedAt: null,
+        },
+      });
     }
 
-    return {
-      ...set,
+    return createUpdatedWorkoutSet(set, {
+      status: "completed",
       reps: null,
       durationSec: input.durationSec ?? null,
       feeling: input.feeling ?? null,
@@ -257,89 +495,66 @@ export function saveSet(
       variant: input.variant ?? set.variant,
       completedAt,
       skippedAt: null,
-    };
+      performed: {
+        reps: null,
+        durationSec: input.durationSec ?? null,
+        weightKg: input.weightKg ?? set.weightKg ?? null,
+        feeling: input.feeling ?? null,
+      },
+      rest: {
+        targetSec: set.rest.targetSec ?? set.restSecTarget ?? null,
+        actualSec: null,
+        startedAt: completedAt,
+        endedAt: null,
+      },
+    });
   });
 
-  return {
+  const nextState = {
     ...state,
     workoutSets: nextWorkoutSets,
-    status: "resting",
+  };
+
+  return {
+    ...nextState,
+    phase: getRestPhaseForCurrentSet(nextState),
   };
 }
 
 export function next(state: SessionFlowState): SessionFlowState {
-  if (state.status === "finished") {
+  if (state.phase === "finished") {
     return state;
   }
 
-  const upcomingPosition = getUpcomingPosition(state);
+  const upcomingPosition = getNextPendingPosition(state);
 
   if (!upcomingPosition) {
     return {
       ...state,
-      status: "finished",
+      phase: "finished",
+      currentExerciseId: null,
+      currentSetId: null,
     };
   }
 
-  return {
-    ...state,
-    currentExerciseIndex: upcomingPosition.exerciseIndex,
-    currentSetIndex: upcomingPosition.setIndex,
-    status: "active",
-  };
+  return createCursorState(state, upcomingPosition, "in_set");
 }
 
 export function finishEarly(state: SessionFlowState): SessionFlowState {
-  if (state.status === "finished") {
+  if (state.phase === "finished") {
     return state;
   }
 
   return {
     ...state,
-    status: "finished",
-  };
-}
-
-export function updateNextSetWeight(
-  state: SessionFlowState,
-  weightKg: number | null,
-): SessionFlowState {
-  const upcomingSet = getUpcomingSet(state);
-
-  if (!upcomingSet) {
-    return state;
-  }
-
-  return {
-    ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, upcomingSet.id, (set) => ({
-      ...set,
-      weightKg,
-    })),
-  };
-}
-
-export function updateNextSetRest(
-  state: SessionFlowState,
-  restSecTarget: number | null,
-): SessionFlowState {
-  const upcomingSet = getUpcomingSet(state);
-
-  if (!upcomingSet) {
-    return state;
-  }
-
-  return {
-    ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, upcomingSet.id, (set) => ({
-      ...set,
-      restSecTarget,
-    })),
+    phase: "finished",
+    currentExerciseId: null,
+    currentSetId: null,
   };
 }
 
 export function skipUpcomingSet(state: SessionFlowState): SessionFlowState {
-  if (state.status !== "resting") {
+  if (!isRestPhase(state.phase)) {
     return state;
   }
 
@@ -351,15 +566,17 @@ export function skipUpcomingSet(state: SessionFlowState): SessionFlowState {
 
   return {
     ...state,
-    workoutSets: updateWorkoutSet(state.workoutSets, upcomingSet.id, (set) => ({
-      ...set,
-      skippedAt: new Date().toISOString(),
-    })),
+    workoutSets: updateWorkoutSet(state.workoutSets, upcomingSet.id, (set) =>
+      createUpdatedWorkoutSet(set, {
+        status: "skipped",
+        skippedAt: new Date().toISOString(),
+      }),
+    ),
   };
 }
 
 export function addSetToCurrentExercise(state: SessionFlowState): SessionFlowState {
-  if (state.status !== "resting") {
+  if (!isRestPhase(state.phase)) {
     return state;
   }
 
@@ -378,6 +595,28 @@ export function addSetToCurrentExercise(state: SessionFlowState): SessionFlowSta
     sessionExerciseId: currentExercise.id,
     setNumber: nextSetNumber,
     metricType: currentSet.metricType,
+    status: "pending",
+    plan: {
+      ...currentSet.plan,
+      weightKg: currentSet.weightKg ?? currentSet.plan.weightKg ?? null,
+      restSec: currentSet.restSecTarget ?? currentSet.plan.restSec ?? null,
+      variant: currentSet.variant,
+    },
+    performed: {
+      reps: null,
+      durationSec: null,
+      weightKg: null,
+      feeling: null,
+    },
+    rest: {
+      targetSec: currentSet.restSecTarget ?? null,
+      actualSec: null,
+      startedAt: null,
+      endedAt: null,
+    },
+    createdAt: nowIso,
+    completedAt: null,
+    skippedAt: null,
     variant: currentSet.variant,
     reps: null,
     durationSec: null,
@@ -385,9 +624,6 @@ export function addSetToCurrentExercise(state: SessionFlowState): SessionFlowSta
     restSecTarget: currentSet.restSecTarget ?? null,
     restSecActual: null,
     feeling: null,
-    completedAt: null,
-    skippedAt: null,
-    createdAt: nowIso,
   };
 
   return {

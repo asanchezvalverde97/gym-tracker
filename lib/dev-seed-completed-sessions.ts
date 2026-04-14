@@ -1,10 +1,10 @@
 import { exercises } from "../data/exercises";
 import { replaceSavedSessions, type SavedSessionBundle } from "./completed-sessions";
 import type {
+  CompletedWorkoutSession,
   Exercise,
   SessionExercise,
   SetVariant,
-  WorkoutSession,
   WorkoutSet,
 } from "../types/workout";
 
@@ -462,6 +462,30 @@ function createCompletedSet(
     sessionExerciseId,
     setNumber,
     metricType,
+    status: "completed",
+    plan: {
+      repsMin: metricType === "reps" ? value : null,
+      repsMax: metricType === "reps" ? value : null,
+      durationSec: metricType === "duration" ? value : null,
+      weightKg,
+      restSec: restSecTarget,
+      variant,
+    },
+    performed: {
+      reps: metricType === "reps" ? value : null,
+      durationSec: metricType === "duration" ? value : null,
+      weightKg,
+      feeling: null,
+    },
+    rest: {
+      targetSec: restSecTarget,
+      actualSec: restSecTarget,
+      startedAt: completedAt,
+      endedAt: completedAt,
+    },
+    createdAt,
+    completedAt,
+    skippedAt: null,
     variant,
     reps: metricType === "reps" ? value : null,
     durationSec: metricType === "duration" ? value : null,
@@ -469,9 +493,6 @@ function createCompletedSet(
     restSecTarget,
     restSecActual: restSecTarget,
     feeling: null,
-    completedAt,
-    skippedAt: null,
-    createdAt,
   };
 }
 
@@ -589,8 +610,9 @@ function buildSeedBundle(
     });
   });
 
-  const session: WorkoutSession = {
+  const session: CompletedWorkoutSession = {
     id: sessionId,
+    kind: "completed",
     routineId: null,
     name: template.day,
     startedAt,
@@ -602,6 +624,7 @@ function buildSeedBundle(
   };
 
   return {
+    kind: "completed_session",
     session,
     sessionExercises,
     workoutSets,

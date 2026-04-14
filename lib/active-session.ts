@@ -1,11 +1,36 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import type { SavedSessionBundle } from "./completed-sessions";
+import type { ActiveWorkoutSession, SessionExercise, WorkoutSet } from "../types/workout";
 
 const ACTIVE_SESSION_STORAGE_KEY = "active_workout_session";
 
+export type ActiveSessionFlowPhase = "in_set" | "rest" | "between_exercises";
+
+export interface ActiveSessionFlowSnapshot {
+  phase: ActiveSessionFlowPhase;
+  currentExerciseId: string;
+  currentSetId: string;
+}
+
+export interface ActiveSessionRestSnapshot {
+  interpretation: "after_completed_set";
+  setId: string;
+  startedAt: string;
+  targetDurationSec: number;
+  endsAt: string | null;
+}
+
+export interface ActiveSessionBundle {
+  kind: "active_session";
+  session: ActiveWorkoutSession;
+  sessionExercises: SessionExercise[];
+  workoutSets: WorkoutSet[];
+  flow: ActiveSessionFlowSnapshot;
+  rest: ActiveSessionRestSnapshot | null;
+}
+
 export async function saveActiveSession(
-  bundle: SavedSessionBundle,
+  bundle: ActiveSessionBundle,
 ): Promise<void> {
   await AsyncStorage.setItem(
     ACTIVE_SESSION_STORAGE_KEY,
@@ -13,7 +38,7 @@ export async function saveActiveSession(
   );
 }
 
-export async function getActiveSession(): Promise<SavedSessionBundle | null> {
+export async function getActiveSession(): Promise<ActiveSessionBundle | null> {
   const rawValue = await AsyncStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
 
   if (!rawValue) {
@@ -21,7 +46,7 @@ export async function getActiveSession(): Promise<SavedSessionBundle | null> {
   }
 
   try {
-    return JSON.parse(rawValue) as SavedSessionBundle;
+    return JSON.parse(rawValue) as ActiveSessionBundle;
   } catch {
     return null;
   }

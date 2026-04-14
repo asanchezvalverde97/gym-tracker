@@ -1,22 +1,23 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type {
+  CompletedWorkoutSession,
   SessionExercise,
-  WorkoutSession,
   WorkoutSet,
 } from "../types/workout";
 
 const COMPLETED_SESSIONS_STORAGE_KEY = "completed_workout_sessions";
 
-export interface SavedSessionBundle {
-  session: WorkoutSession;
+export interface CompletedSessionBundle {
+  kind: "completed_session";
+  session: CompletedWorkoutSession;
   sessionExercises: SessionExercise[];
   workoutSets: WorkoutSet[];
-  restStartTimeMs?: number | null;
-  restDurationTargetSec?: number | null;
 }
 
-async function readSavedSessionBundles(): Promise<SavedSessionBundle[]> {
+export type SavedSessionBundle = CompletedSessionBundle;
+
+async function readSavedSessionBundles(): Promise<CompletedSessionBundle[]> {
   const rawValue = await AsyncStorage.getItem(COMPLETED_SESSIONS_STORAGE_KEY);
 
   if (!rawValue) {
@@ -24,7 +25,7 @@ async function readSavedSessionBundles(): Promise<SavedSessionBundle[]> {
   }
 
   try {
-    const parsedValue = JSON.parse(rawValue) as SavedSessionBundle[];
+    const parsedValue = JSON.parse(rawValue) as CompletedSessionBundle[];
     return Array.isArray(parsedValue) ? parsedValue : [];
   } catch {
     return [];
@@ -32,7 +33,7 @@ async function readSavedSessionBundles(): Promise<SavedSessionBundle[]> {
 }
 
 async function writeSavedSessionBundles(
-  bundles: SavedSessionBundle[],
+  bundles: CompletedSessionBundle[],
 ): Promise<void> {
   await AsyncStorage.setItem(
     COMPLETED_SESSIONS_STORAGE_KEY,
@@ -41,12 +42,13 @@ async function writeSavedSessionBundles(
 }
 
 export async function saveCompletedSession(
-  session: WorkoutSession,
+  session: CompletedWorkoutSession,
   sessionExercises: SessionExercise[],
   workoutSets: WorkoutSet[],
 ): Promise<void> {
   const savedBundles = await readSavedSessionBundles();
-  const nextBundle: SavedSessionBundle = {
+  const nextBundle: CompletedSessionBundle = {
+    kind: "completed_session",
     session,
     sessionExercises,
     workoutSets,
@@ -64,13 +66,13 @@ export async function saveCompletedSession(
   await writeSavedSessionBundles(savedBundles);
 }
 
-export async function getSavedSessions(): Promise<SavedSessionBundle[]> {
+export async function getSavedSessions(): Promise<CompletedSessionBundle[]> {
   return readSavedSessionBundles();
 }
 
 export async function getSavedSessionById(
   sessionId: string,
-): Promise<SavedSessionBundle | null> {
+): Promise<CompletedSessionBundle | null> {
   const savedBundles = await readSavedSessionBundles();
 
   return savedBundles.find((bundle) => bundle.session.id === sessionId) ?? null;
@@ -84,7 +86,7 @@ export async function deleteSavedSessionById(sessionId: string): Promise<void> {
 }
 
 export async function replaceSavedSessions(
-  bundles: SavedSessionBundle[],
+  bundles: CompletedSessionBundle[],
 ): Promise<void> {
   await writeSavedSessionBundles(bundles);
 }

@@ -20,6 +20,12 @@ export interface Routine {
   createdAt: string;
 }
 
+export interface RoutineTemplate {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
 export interface RoutineExercise {
   id: string;
   routineId: string;
@@ -35,17 +41,28 @@ export interface RoutineExercise {
   defaultSetVariant?: SetVariant;
 }
 
-export interface WorkoutSession {
+export interface WorkoutSessionBase {
   id: string;
   routineId?: string | null;
   name: string;
   startedAt: string;
-  endedAt?: string | null;
   bodyweightKg?: number | null;
   feeling?: SetFeeling | null;
   notes?: string | null;
   createdAt: string;
 }
+
+export interface ActiveWorkoutSession extends WorkoutSessionBase {
+  kind: "active";
+  endedAt: null;
+}
+
+export interface CompletedWorkoutSession extends WorkoutSessionBase {
+  kind: "completed";
+  endedAt: string;
+}
+
+export type WorkoutSession = ActiveWorkoutSession | CompletedWorkoutSession;
 
 export interface SessionExercise {
   id: string;
@@ -60,11 +77,43 @@ export interface SessionExercise {
   defaultRestSec?: number | null;
 }
 
+export interface WorkoutSetPlan {
+  repsMin?: number | null;
+  repsMax?: number | null;
+  durationSec?: number | null;
+  weightKg?: number | null;
+  restSec?: number | null;
+  variant: SetVariant;
+}
+
+export interface WorkoutSetPerformance {
+  reps?: number | null;
+  durationSec?: number | null;
+  weightKg?: number | null;
+  feeling?: SetFeeling | null;
+}
+
+export interface WorkoutSetRest {
+  targetSec?: number | null;
+  actualSec?: number | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+}
+
+export type WorkoutSetStatus = "pending" | "completed" | "skipped";
+
 export interface WorkoutSet {
   id: string;
   sessionExerciseId: string;
   setNumber: number;
   metricType: ExerciseMetricType;
+  status: WorkoutSetStatus;
+  plan: WorkoutSetPlan;
+  performed: WorkoutSetPerformance;
+  rest: WorkoutSetRest;
+  createdAt: string;
+  completedAt: string | null;
+  skippedAt: string | null;
   variant: SetVariant;
   reps?: number | null;
   durationSec?: number | null;
@@ -72,9 +121,6 @@ export interface WorkoutSet {
   restSecTarget?: number | null;
   restSecActual?: number | null;
   feeling?: SetFeeling | null;
-  completedAt: string | null;
-  skippedAt: string | null;
-  createdAt: string;
 }
 
 export interface MotivationalQuote {

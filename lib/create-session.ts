@@ -2,15 +2,15 @@ import { exercises } from "../data/exercises";
 import type { UserSettings } from "./user-settings";
 import type {
   Exercise,
+  ActiveWorkoutSession,
   Routine,
   RoutineExercise,
   SessionExercise,
-  WorkoutSession,
   WorkoutSet,
 } from "../types/workout";
 
 export interface CreateSessionResult {
-  session: WorkoutSession;
+  session: ActiveWorkoutSession;
   sessionExercises: SessionExercise[];
   workoutSets: WorkoutSet[];
 }
@@ -60,12 +60,39 @@ function createWorkoutSets(
   nowIso: string,
 ): WorkoutSet[] {
   const variant = routineExercise.defaultSetVariant ?? "normal";
+  const targetReps =
+    routineExercise.targetReps ??
+    routineExercise.targetRepsMax ??
+    routineExercise.targetRepsMin ??
+    null;
 
   return Array.from({ length: sessionExercise.targetSets }, (_, index) => ({
     id: createId("ws", sessionExercise.id, index + 1),
     sessionExerciseId: sessionExercise.id,
     setNumber: index + 1,
     metricType: exercise.metricType,
+    status: "pending",
+    plan: {
+      repsMin: targetReps,
+      repsMax: targetReps,
+      durationSec: routineExercise.targetDurationSec ?? null,
+      weightKg: routineExercise.defaultWeightKg ?? null,
+      restSec: routineExercise.defaultRestSec ?? null,
+      variant,
+    },
+    performed: {
+      reps: null,
+      durationSec: null,
+      weightKg: null,
+      feeling: null,
+    },
+    rest: {
+      targetSec: routineExercise.defaultRestSec ?? null,
+      actualSec: null,
+      startedAt: null,
+      endedAt: null,
+    },
+    createdAt: nowIso,
     variant,
     reps: null,
     durationSec: null,
@@ -75,7 +102,6 @@ function createWorkoutSets(
     feeling: null,
     completedAt: null,
     skippedAt: null,
-    createdAt: nowIso,
   }));
 }
 
@@ -87,8 +113,9 @@ export function createSessionFromRoutine(
   const nowIso = new Date().toISOString();
   const sessionId = createId("session", routine.id, Date.now());
 
-  const session: WorkoutSession = {
+  const session: ActiveWorkoutSession = {
     id: sessionId,
+    kind: "active",
     routineId: routine.id,
     name: routine.name,
     startedAt: nowIso,

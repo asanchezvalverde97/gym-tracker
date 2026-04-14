@@ -10,8 +10,7 @@ export interface SessionFlowState {
   workoutSets: WorkoutSet[];
   currentExerciseIndex: number;
   currentSetIndex: number;
-  isResting: boolean;
-  isFinished: boolean;
+  status: "active" | "resting" | "finished";
 }
 
 interface SaveSetInput {
@@ -50,24 +49,28 @@ function updateWorkoutSet(
   return workoutSets.map((set) => (set.id === setId ? updater(set) : set));
 }
 
+function isSetUnavailable(set: WorkoutSet): boolean {
+  return set.completedAt != null || set.skippedAt != null;
+}
+
 export function createSessionFlowState(
   sessionExercises: SessionExercise[],
   workoutSets: WorkoutSet[],
+  status: SessionFlowState["status"] = "active",
 ): SessionFlowState {
   return {
     sessionExercises: getOrderedSessionExercises(sessionExercises),
     workoutSets: [...workoutSets],
     currentExerciseIndex: 0,
     currentSetIndex: 0,
-    isResting: false,
-    isFinished: sessionExercises.length === 0,
+    status: sessionExercises.length === 0 ? "finished" : status,
   };
 }
 
 export function getCurrentExercise(
   state: SessionFlowState,
 ): SessionExercise | null {
-  if (state.isFinished) {
+  if (state.status === "finished") {
     return null;
   }
 
@@ -87,27 +90,24 @@ export function getCurrentSet(state: SessionFlowState): WorkoutSet | null {
 }
 
 function getUpcomingPosition(state: SessionFlowState): SetPosition | null {
-  const currentExercise = getCurrentExercise(state);
-  const currentSets = currentExercise
-    ? getExerciseSets(state.workoutSets, currentExercise.id)
-    : [];
+  for (
+    let exerciseIndex = state.currentExerciseIndex;
+    exerciseIndex < state.sessionExercises.length;
+    exerciseIndex += 1
+  ) {
+    const exercise = state.sessionExercises[exerciseIndex];
+    const sets = getExerciseSets(state.workoutSets, exercise.id);
+    const startSetIndex =
+      exerciseIndex === state.currentExerciseIndex ? state.currentSetIndex + 1 : 0;
 
-  if (!currentExercise || currentSets.length === 0) {
-    return null;
-  }
-
-  if (state.currentSetIndex < currentSets.length - 1) {
-    return {
-      exerciseIndex: state.currentExerciseIndex,
-      setIndex: state.currentSetIndex + 1,
-    };
-  }
-
-  if (state.currentExerciseIndex < state.sessionExercises.length - 1) {
-    return {
-      exerciseIndex: state.currentExerciseIndex + 1,
-      setIndex: 0,
-    };
+    for (let setIndex = startSetIndex; setIndex < sets.length; setIndex += 1) {
+      if (!isSetUnavailable(sets[setIndex])) {
+        return {
+          exerciseIndex,
+          setIndex,
+        };
+      }
+    }
   }
 
   return null;
@@ -199,7 +199,7 @@ export function updateCurrentSetFeeling(
   state: SessionFlowState,
   feeling: SetFeeling | null,
 ): SessionFlowState {
-  if (!state.isResting) {
+  if (state.status !== "resting") {
     return state;
   }
 
@@ -222,13 +222,19 @@ export function saveSet(
   state: SessionFlowState,
   input: SaveSetInput,
 ): SessionFlowState {
+  if (state.status === "resting") {
+    return state;
+  }
+
   const currentSet = getCurrentSet(state);
 
-  if (!currentSet || state.isFinished) {
+  if (!currentSet || state.status === "finished") {
     return state;
   }
 
   const nextWorkoutSets = updateWorkoutSet(state.workoutSets, currentSet.id, (set) => {
+    const completedAt = new Date().toISOString();
+
     if (set.metricType === "reps") {
       return {
         ...set,
@@ -237,6 +243,8 @@ export function saveSet(
         feeling: input.feeling ?? null,
         weightKg: input.weightKg ?? set.weightKg ?? null,
         variant: input.variant ?? set.variant,
+        completedAt,
+        skippedAt: null,
       };
     }
 
@@ -247,18 +255,20 @@ export function saveSet(
       feeling: input.feeling ?? null,
       weightKg: input.weightKg ?? set.weightKg ?? null,
       variant: input.variant ?? set.variant,
+      completedAt,
+      skippedAt: null,
     };
   });
 
   return {
     ...state,
     workoutSets: nextWorkoutSets,
-    isResting: true,
+    status: "resting",
   };
 }
 
 export function next(state: SessionFlowState): SessionFlowState {
-  if (state.isFinished) {
+  if (state.status === "finished") {
     return state;
   }
 
@@ -267,8 +277,7 @@ export function next(state: SessionFlowState): SessionFlowState {
   if (!upcomingPosition) {
     return {
       ...state,
-      isResting: false,
-      isFinished: true,
+      status: "finished",
     };
   }
 
@@ -276,7 +285,18 @@ export function next(state: SessionFlowState): SessionFlowState {
     ...state,
     currentExerciseIndex: upcomingPosition.exerciseIndex,
     currentSetIndex: upcomingPosition.setIndex,
-    isResting: false,
+    status: "active",
+  };
+}
+
+export function finishEarly(state: SessionFlowState): SessionFlowState {
+  if (state.status === "finished") {
+    return state;
+  }
+
+  return {
+    ...state,
+    status: "finished",
   };
 }
 
@@ -315,5 +335,63 @@ export function updateNextSetRest(
       ...set,
       restSecTarget,
     })),
+  };
+}
+
+export function skipUpcomingSet(state: SessionFlowState): SessionFlowState {
+  if (state.status !== "resting") {
+    return state;
+  }
+
+  const upcomingSet = getUpcomingSet(state);
+
+  if (!upcomingSet) {
+    return state;
+  }
+
+  return {
+    ...state,
+    workoutSets: updateWorkoutSet(state.workoutSets, upcomingSet.id, (set) => ({
+      ...set,
+      skippedAt: new Date().toISOString(),
+    })),
+  };
+}
+
+export function addSetToCurrentExercise(state: SessionFlowState): SessionFlowState {
+  if (state.status !== "resting") {
+    return state;
+  }
+
+  const currentExercise = getCurrentExercise(state);
+  const currentSet = getCurrentSet(state);
+
+  if (!currentExercise || !currentSet) {
+    return state;
+  }
+
+  const exerciseSets = getExerciseSets(state.workoutSets, currentExercise.id);
+  const nextSetNumber = exerciseSets.length + 1;
+  const nowIso = new Date().toISOString();
+  const newSet: WorkoutSet = {
+    id: `ws_${currentExercise.id}_${nextSetNumber}_${Date.now()}`,
+    sessionExerciseId: currentExercise.id,
+    setNumber: nextSetNumber,
+    metricType: currentSet.metricType,
+    variant: currentSet.variant,
+    reps: null,
+    durationSec: null,
+    weightKg: currentSet.weightKg ?? null,
+    restSecTarget: currentSet.restSecTarget ?? null,
+    restSecActual: null,
+    feeling: null,
+    completedAt: null,
+    skippedAt: null,
+    createdAt: nowIso,
+  };
+
+  return {
+    ...state,
+    workoutSets: [...state.workoutSets, newSet],
   };
 }

@@ -1,21 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AppState,
+  Animated,
   PanResponder,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import { router, useLocalSearchParams } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { exercises } from "../data/exercises";
-import { routines } from "../data/routines";
-import type { Routine } from "../types/workout";
+import { AppColors } from "../constants/ui";
+import { getExerciseDisplayName } from "../lib/display-name";
 import {
   createSessionFromRoutine,
   type CreateSessionResult,
 } from "../lib/create-session";
+import { getRoutineBundleById, getRoutineBundles } from "../lib/routines-storage";
+import {
+  clearStartWorkoutDraft,
+  getStartWorkoutDraft,
+} from "../lib/start-workout-draft";
+import { getUserSettings } from "../lib/user-settings";
 import {
   clearActiveSession,
   getActiveSession,
@@ -23,12 +32,16 @@ import {
 } from "../lib/active-session";
 import { saveCompletedSession } from "../lib/completed-sessions";
 import {
+  addSetToCurrentExercise,
   createSessionFlowState,
+  finishEarly,
   getCurrentExercise,
   getCurrentSet,
   getUpcomingExercise,
+  getUpcomingSet,
   next,
   saveSet,
+  skipUpcomingSet,
   updateCurrentSetActualRest,
   updateCurrentSetFeeling,
   updateCurrentSetRest,
@@ -64,38 +77,40 @@ const restPhrases = [
 ];
 
 const secondsOptions = Array.from({ length: 12 }, (_, index) => index * 5);
-const wheelRowHeight = 44;
+const wheelRowHeight = 52;
 
-function getExerciseName(exerciseId: string): string {
-  return exercises.find((exercise) => exercise.id === exerciseId)?.name ?? exerciseId;
-}
+async function createInitialSessionData(
+  routineId?: string,
+  draftId?: string,
+): Promise<CreateSessionResult | null> {
+  const routineBundle = draftId
+    ? await getStartWorkoutDraft(draftId)
+    : routineId
+      ? await getRoutineBundleById(routineId)
+      : (await getRoutineBundles())[0] ?? null;
 
-function getRoutineFromId(routineId?: string): Routine | null {
-  if (routineId) {
-    const matchingRoutine = routines.find((routine) => routine.id === routineId);
-
-    if (matchingRoutine) {
-      return matchingRoutine;
-    }
-  }
-
-  return routines[0] ?? null;
-}
-
-function createInitialSessionData(routineId?: string): CreateSessionResult | null {
-  const routine = getRoutineFromId(routineId);
-
-  if (!routine) {
+  if (!routineBundle) {
     return null;
   }
 
-  return createSessionFromRoutine(routine);
+  const userSettings = await getUserSettings();
+  if (draftId) {
+    await clearStartWorkoutDraft();
+  }
+
+  return createSessionFromRoutine(
+    routineBundle.routine,
+    routineBundle.routineExercises,
+    userSettings,
+  );
 }
 
 function isValidActiveSessionBundle(value: unknown): value is {
   session: WorkoutSession;
   sessionExercises: SessionFlowState["sessionExercises"];
   workoutSets: SessionFlowState["workoutSets"];
+  restStartTimeMs?: number | null;
+  restDurationTargetSec?: number | null;
 } {
   if (!value || typeof value !== "object") {
     return false;
@@ -112,6 +127,99 @@ function isValidActiveSessionBundle(value: unknown): value is {
     Array.isArray(bundle.sessionExercises) &&
     Array.isArray(bundle.workoutSets)
   );
+}
+
+function getRestoredFlowState(bundle: {
+  session: WorkoutSession;
+  sessionExercises: SessionFlowState["sessionExercises"];
+  workoutSets: SessionFlowState["workoutSets"];
+  restStartTimeMs?: number | null;
+  restDurationTargetSec?: number | null;
+}): {
+  flowState: SessionFlowState;
+  restStartTimeMs: number | null;
+  restDurationTargetSec: number | null;
+  restEndTimeMs: number | null;
+} | null {
+  if (bundle.session.endedAt != null) {
+    return null;
+  }
+
+  if (bundle.sessionExercises.length === 0 || bundle.workoutSets.length === 0) {
+    return null;
+  }
+
+  const hasRestStart = bundle.restStartTimeMs != null;
+  const hasRestDuration = bundle.restDurationTargetSec != null;
+
+  if (hasRestStart !== hasRestDuration) {
+    return null;
+  }
+
+  const orderedExercises = [...bundle.sessionExercises].sort((a, b) => a.order - b.order);
+  const flatSets: Array<{
+    exerciseIndex: number;
+    setIndex: number;
+    completedAt: string | null;
+    skippedAt: string | null;
+  }> = [];
+
+  for (let exerciseIndex = 0; exerciseIndex < orderedExercises.length; exerciseIndex += 1) {
+    const exercise = orderedExercises[exerciseIndex];
+    const sets = bundle.workoutSets
+      .filter((set) => set.sessionExerciseId === exercise.id)
+      .sort((a, b) => a.setNumber - b.setNumber);
+
+    if (sets.length === 0) {
+      return null;
+    }
+
+    for (let setIndex = 0; setIndex < sets.length; setIndex += 1) {
+      flatSets.push({
+        exerciseIndex,
+        setIndex,
+        completedAt: sets[setIndex].completedAt,
+        skippedAt: sets[setIndex].skippedAt,
+      });
+    }
+  }
+
+  const firstIncompleteIndex = flatSets.findIndex(
+    (set) => set.completedAt == null && set.skippedAt == null,
+  );
+
+  if (firstIncompleteIndex === -1) {
+    return null;
+  }
+
+  if (
+    flatSets
+      .slice(firstIncompleteIndex + 1)
+      .some((set) => set.completedAt != null || set.skippedAt != null)
+  ) {
+    return null;
+  }
+
+  if (hasRestStart && firstIncompleteIndex === 0) {
+    return null;
+  }
+
+  const currentPosition = flatSets[firstIncompleteIndex];
+  const status = hasRestStart ? "resting" : "active";
+
+  return {
+    flowState: {
+      ...createSessionFlowState(bundle.sessionExercises, bundle.workoutSets, status),
+      currentExerciseIndex: currentPosition.exerciseIndex,
+      currentSetIndex: currentPosition.setIndex,
+    },
+    restStartTimeMs: bundle.restStartTimeMs ?? null,
+    restDurationTargetSec: bundle.restDurationTargetSec ?? null,
+    restEndTimeMs:
+      bundle.restStartTimeMs != null && bundle.restDurationTargetSec != null
+        ? bundle.restStartTimeMs + bundle.restDurationTargetSec * 1000
+        : null,
+  };
 }
 
 function getInitialMainValue(
@@ -137,6 +245,36 @@ function formatCountdown(seconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(
     remainingSeconds,
   ).padStart(2, "0")}`;
+}
+
+function formatElapsedDuration(
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+  nowMs: number,
+): string {
+  if (!startedAt) {
+    return "00:00";
+  }
+
+  const startedAtMs = new Date(startedAt).getTime();
+  const endedAtMs = endedAt ? new Date(endedAt).getTime() : nowMs;
+
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs) || endedAtMs < startedAtMs) {
+    return "00:00";
+  }
+
+  const totalSeconds = Math.floor((endedAtMs - startedAtMs) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(
+      seconds,
+    ).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -199,6 +337,17 @@ function getRemainingRestSeconds(
   }
 
   return Math.ceil(remainingMs / 1000);
+}
+
+function getRemainingRestMilliseconds(
+  restEndTimeMs: number | null,
+  nowMs: number,
+): number {
+  if (restEndTimeMs == null) {
+    return 0;
+  }
+
+  return Math.max(0, restEndTimeMs - nowMs);
 }
 
 function WheelNumberControl({
@@ -276,7 +425,6 @@ function WheelNumberControl({
             {nextValue == null ? "" : displayValue(nextValue)}
           </Text>
         </View>
-        <View pointerEvents="none" style={styles.wheelCenterHighlight} />
       </View>
     </View>
   );
@@ -291,14 +439,24 @@ function RestWheelControl({
   totalSeconds: number;
   onChange: (value: number) => void;
 }) {
-  const parts = toRestParts(totalSeconds);
+  const initialParts = toRestParts(totalSeconds);
+  const [minutesValue, setMinutesValue] = useState(initialParts.minutes);
+  const [secondsValue, setSecondsValue] = useState(initialParts.seconds);
+
+  useEffect(() => {
+    const nextParts = toRestParts(totalSeconds);
+    setMinutesValue(nextParts.minutes);
+    setSecondsValue(nextParts.seconds);
+  }, [totalSeconds]);
 
   function handleMinutesChange(minutes: number) {
-    onChange(fromRestParts(minutes, parts.seconds));
+    setMinutesValue(minutes);
+    onChange(fromRestParts(minutes, secondsValue));
   }
 
   function handleSecondsChange(seconds: number) {
-    onChange(fromRestParts(parts.minutes, seconds));
+    setSecondsValue(seconds);
+    onChange(fromRestParts(minutesValue, seconds));
   }
 
   return (
@@ -307,14 +465,14 @@ function RestWheelControl({
       <View style={styles.restWheelRow}>
         <WheelNumberControl
           label="Min"
-          value={parts.minutes}
+          value={minutesValue}
           options={createNumberRange(0, 5)}
           onChange={handleMinutesChange}
           formatValue={(value) => String(value)}
         />
         <WheelNumberControl
           label="Sec"
-          value={parts.seconds}
+          value={secondsValue}
           options={secondsOptions}
           onChange={handleSecondsChange}
           formatValue={(value) => String(value).padStart(2, "0")}
@@ -325,10 +483,17 @@ function RestWheelControl({
 }
 
 export default function SessionScreen() {
-  const params = useLocalSearchParams<{ routineId?: string | string[] }>();
+  const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{
+    routineId?: string | string[];
+    draftId?: string | string[];
+  }>();
   const selectedRoutineId = Array.isArray(params.routineId)
     ? params.routineId[0]
     : params.routineId;
+  const selectedDraftId = Array.isArray(params.draftId)
+    ? params.draftId[0]
+    : params.draftId;
   const [flowState, setFlowState] = useState<SessionFlowState | null>(null);
   const [session, setSession] = useState<WorkoutSession | null>(null);
   const [isHydrating, setIsHydrating] = useState(true);
@@ -342,17 +507,191 @@ export default function SessionScreen() {
   const [restEndTimeMs, setRestEndTimeMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [restPhrase, setRestPhrase] = useState(restPhrases[0]);
+  const [isFinalFeelingOverlay, setIsFinalFeelingOverlay] = useState(false);
+  const [showNextTransition, setShowNextTransition] = useState(false);
+  const [sessionFeeling, setSessionFeeling] = useState<SetFeeling | null>(null);
+  const [sessionNotes, setSessionNotes] = useState("");
   const hasAdvancedRestRef = useRef(false);
+  const hasPlayedRestCompleteRef = useRef(false);
+  const hasStartedNextTransitionRef = useRef(false);
   const hasSavedCompletedSessionRef = useRef(false);
+  const isFinalizingSessionRef = useRef(false);
   const flowStateRef = useRef<SessionFlowState | null>(null);
   const sessionRef = useRef<WorkoutSession | null>(null);
   const restStartTimeMsRef = useRef<number | null>(null);
   const restDurationTargetSecRef = useRef<number | null>(null);
+  const restCompleteSoundRef = useRef<AudioPlayer | null>(null);
+  const nextTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nextTransitionAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nextTransitionBackdropOpacity = useRef(new Animated.Value(0)).current;
+  const nextTransitionBackdropScale = useRef(new Animated.Value(0.94)).current;
+  const nextTransitionOpacity = useRef(new Animated.Value(0)).current;
+  const nextTransitionScale = useRef(new Animated.Value(0.9)).current;
+  const nextExerciseOpacity = useRef(new Animated.Value(0)).current;
+  const nextExerciseAccentOpacity = useRef(new Animated.Value(0.42)).current;
+  const nextExerciseScale = useRef(new Animated.Value(0.9)).current;
 
   const currentExercise = flowState ? getCurrentExercise(flowState) : null;
   const currentSet = flowState ? getCurrentSet(flowState) : null;
   const upcomingExercise = flowState ? getUpcomingExercise(flowState) : null;
+  const upcomingSet = flowState ? getUpcomingSet(flowState) : null;
   const remainingRestSec = getRemainingRestSeconds(restEndTimeMs, nowMs);
+  const remainingRestMs = getRemainingRestMilliseconds(restEndTimeMs, nowMs);
+  const nextTransitionLeadMs = 1200;
+  const nextTransitionDurationMs = 1200;
+
+  function startNextTransition() {
+    if (hasStartedNextTransitionRef.current) {
+      return;
+    }
+
+    hasStartedNextTransitionRef.current = true;
+    if (!hasPlayedRestCompleteRef.current) {
+      hasPlayedRestCompleteRef.current = true;
+      restCompleteSoundRef.current?.seekTo(0);
+      restCompleteSoundRef.current?.play();
+    }
+    nextTransitionBackdropOpacity.setValue(0);
+    nextTransitionBackdropScale.setValue(0.94);
+    nextTransitionOpacity.setValue(0);
+    nextTransitionScale.setValue(0.9);
+    nextExerciseOpacity.setValue(0);
+    nextExerciseAccentOpacity.setValue(0.42);
+    nextExerciseScale.setValue(0.9);
+    setShowNextTransition(true);
+
+    Animated.parallel([
+      Animated.sequence([
+        Animated.timing(nextTransitionBackdropOpacity, {
+          toValue: 0.14,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+        Animated.timing(nextTransitionBackdropOpacity, {
+          toValue: 0.08,
+          duration: 420,
+          useNativeDriver: true,
+        }),
+        Animated.timing(nextTransitionBackdropOpacity, {
+          toValue: 0,
+          duration: 260,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.timing(nextTransitionBackdropScale, {
+          toValue: 1.02,
+          duration: 520,
+          useNativeDriver: true,
+        }),
+        Animated.timing(nextTransitionBackdropScale, {
+          toValue: 1.08,
+          duration: 340,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(nextTransitionOpacity, {
+            toValue: 1,
+            duration: 140,
+            useNativeDriver: true,
+          }),
+          Animated.timing(nextTransitionScale, {
+            toValue: 1.04,
+            duration: 180,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.delay(250),
+        Animated.parallel([
+          Animated.timing(nextTransitionOpacity, {
+            toValue: 0,
+            duration: 200,
+            useNativeDriver: true,
+          }),
+          Animated.timing(nextTransitionScale, {
+            toValue: 1.08,
+            duration: 200,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+      Animated.sequence([
+        Animated.delay(320),
+        Animated.timing(nextExerciseOpacity, {
+          toValue: 1,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.delay(320),
+        Animated.spring(nextExerciseScale, {
+          toValue: 1,
+          tension: 120,
+          friction: 8,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.delay(320),
+        Animated.timing(nextExerciseAccentOpacity, {
+          toValue: 0.78,
+          duration: 140,
+          useNativeDriver: true,
+        }),
+        Animated.timing(nextExerciseAccentOpacity, {
+          toValue: 0,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+
+    if (nextTransitionAdvanceTimeoutRef.current != null) {
+      clearTimeout(nextTransitionAdvanceTimeoutRef.current);
+      nextTransitionAdvanceTimeoutRef.current = null;
+    }
+
+    nextTransitionAdvanceTimeoutRef.current = setTimeout(() => {
+      nextTransitionAdvanceTimeoutRef.current = null;
+
+      if (hasAdvancedRestRef.current) {
+        return;
+      }
+
+      hasAdvancedRestRef.current = true;
+      setShowNextTransition(false);
+      handleAdvanceRest();
+    }, nextTransitionDurationMs);
+  }
+
+  useEffect(() => {
+    const player = createAudioPlayer(
+      require("../assets/sounds/lifeneverbeensoweet.mp3"),
+    );
+    restCompleteSoundRef.current = player;
+
+    return () => {
+      if (nextTransitionTimeoutRef.current != null) {
+        clearTimeout(nextTransitionTimeoutRef.current);
+        nextTransitionTimeoutRef.current = null;
+      }
+
+      if (nextTransitionAdvanceTimeoutRef.current != null) {
+        clearTimeout(nextTransitionAdvanceTimeoutRef.current);
+        nextTransitionAdvanceTimeoutRef.current = null;
+      }
+
+      const sound = restCompleteSoundRef.current;
+      restCompleteSoundRef.current = null;
+
+      if (sound) {
+        sound.release();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     flowStateRef.current = flowState;
@@ -374,14 +713,18 @@ export default function SessionScreen() {
         return;
       }
 
-      if (selectedRoutineId) {
-        const initialSessionData = createInitialSessionData(selectedRoutineId);
+      if (selectedRoutineId || selectedDraftId) {
+        const initialSessionData = await createInitialSessionData(
+          selectedRoutineId,
+          selectedDraftId,
+        );
 
         setFlowState(
           initialSessionData
             ? createSessionFlowState(
                 initialSessionData.sessionExercises,
                 initialSessionData.workoutSets,
+                "active",
               )
             : null,
         );
@@ -394,30 +737,39 @@ export default function SessionScreen() {
         }
 
         if (isValidActiveSessionBundle(savedActiveSession)) {
-          setFlowState(
-            createSessionFlowState(
-              savedActiveSession.sessionExercises,
-              savedActiveSession.workoutSets,
-            ),
-          );
-          setSession(savedActiveSession.session);
-          nextRestStartTimeMs = savedActiveSession.restStartTimeMs ?? null;
-          nextRestDurationTargetSec =
-            savedActiveSession.restDurationTargetSec ?? null;
-          nextRestEndTimeMs =
-            savedActiveSession.restStartTimeMs != null &&
-              savedActiveSession.restDurationTargetSec != null
-              ? savedActiveSession.restStartTimeMs +
-                  savedActiveSession.restDurationTargetSec * 1000
-              : null;
+          const restoredState = getRestoredFlowState(savedActiveSession);
+
+          if (restoredState) {
+            setFlowState(restoredState.flowState);
+            setSession(savedActiveSession.session);
+            nextRestStartTimeMs = restoredState.restStartTimeMs;
+            nextRestDurationTargetSec = restoredState.restDurationTargetSec;
+            nextRestEndTimeMs = restoredState.restEndTimeMs;
+          } else {
+            await clearActiveSession();
+            const initialSessionData = await createInitialSessionData();
+
+            setFlowState(
+              initialSessionData
+                ? createSessionFlowState(
+                    initialSessionData.sessionExercises,
+                    initialSessionData.workoutSets,
+                    "active",
+                  )
+                : null,
+            );
+            setSession(initialSessionData?.session ?? null);
+          }
         } else {
-          const initialSessionData = createInitialSessionData();
+          await clearActiveSession();
+          const initialSessionData = await createInitialSessionData();
 
           setFlowState(
             initialSessionData
               ? createSessionFlowState(
                   initialSessionData.sessionExercises,
                   initialSessionData.workoutSets,
+                  "active",
                 )
               : null,
           );
@@ -429,15 +781,22 @@ export default function SessionScreen() {
       setShowFeelingOverlay(false);
       setMainValue(0);
       setCurrentWeightValue(0);
-      setCurrentRestValue(0);
-      setRestStartTimeMs(nextRestStartTimeMs);
-      setRestDurationTargetSec(nextRestDurationTargetSec);
-      setRestEndTimeMs(nextRestEndTimeMs);
-      setNowMs(Date.now());
-      setRestPhrase(restPhrases[0]);
-      hasAdvancedRestRef.current = false;
-      hasSavedCompletedSessionRef.current = false;
-      setIsHydrating(false);
+        setCurrentRestValue(0);
+        setRestStartTimeMs(nextRestStartTimeMs);
+        setRestDurationTargetSec(nextRestDurationTargetSec);
+        setRestEndTimeMs(nextRestEndTimeMs);
+        setNowMs(Date.now());
+        setRestPhrase(restPhrases[0]);
+        setIsFinalFeelingOverlay(false);
+        setShowNextTransition(false);
+        hasStartedNextTransitionRef.current = false;
+        setSessionFeeling(null);
+        setSessionNotes("");
+        hasAdvancedRestRef.current = false;
+        hasPlayedRestCompleteRef.current = false;
+        hasSavedCompletedSessionRef.current = false;
+        isFinalizingSessionRef.current = false;
+        setIsHydrating(false);
     }
 
     void initializeSession();
@@ -445,7 +804,7 @@ export default function SessionScreen() {
     return () => {
       isActive = false;
     };
-  }, [selectedRoutineId]);
+  }, [selectedDraftId, selectedRoutineId]);
 
   useEffect(() => {
     if (!currentExercise || !currentSet) {
@@ -467,36 +826,43 @@ export default function SessionScreen() {
   }, [currentExercise?.id, currentSet?.id]);
 
   useEffect(() => {
-    if (!flowState?.isResting) {
-      setRestStartTimeMs(null);
-      setRestDurationTargetSec(null);
-      setRestEndTimeMs(null);
-      setShowFeelingOverlay(false);
-      hasAdvancedRestRef.current = false;
-      return;
-    }
+      if (flowState?.status !== "resting" && !isFinalFeelingOverlay) {
+        setRestStartTimeMs(null);
+        setRestDurationTargetSec(null);
+        setRestEndTimeMs(null);
+        setShowFeelingOverlay(false);
+        setShowNextTransition(false);
+        hasStartedNextTransitionRef.current = false;
+        hasAdvancedRestRef.current = false;
+        hasPlayedRestCompleteRef.current = false;
+        return;
+      }
 
     if (restStartTimeMs != null && restDurationTargetSec != null) {
       setRestEndTimeMs(restStartTimeMs + restDurationTargetSec * 1000);
       setNowMs(Date.now());
     }
 
-    hasAdvancedRestRef.current = false;
-  }, [
-    flowState?.isResting,
-    currentSet?.id,
+      hasAdvancedRestRef.current = false;
+      hasPlayedRestCompleteRef.current = false;
+      setShowNextTransition(false);
+      hasStartedNextTransitionRef.current = false;
+    }, [
+      flowState?.status,
+      currentSet?.id,
     currentSet?.restSecTarget,
+    isFinalFeelingOverlay,
     restDurationTargetSec,
     restStartTimeMs,
   ]);
 
   useEffect(() => {
-    if (!flowState?.isResting) {
+    if (flowState?.status !== "resting") {
       return;
     }
 
     setRestPhrase(getRandomRestPhrase());
-  }, [flowState?.isResting, currentSet?.id]);
+  }, [flowState?.status, currentSet?.id]);
 
   useEffect(() => {
     if (!showFeelingOverlay) {
@@ -511,7 +877,7 @@ export default function SessionScreen() {
   }, [showFeelingOverlay]);
 
   useEffect(() => {
-    if (!flowState?.isResting) {
+    if (!session || session.endedAt != null) {
       return;
     }
 
@@ -521,7 +887,7 @@ export default function SessionScreen() {
     }, 1000);
 
     return () => clearInterval(intervalId);
-  }, [flowState?.isResting]);
+  }, [session?.endedAt, session?.startedAt]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextAppState) => {
@@ -537,11 +903,16 @@ export default function SessionScreen() {
         return;
       }
 
+      if (currentFlowState.status === "finished" || currentSession.endedAt != null) {
+        void clearActiveSession();
+        return;
+      }
+
       const now = Date.now();
       const currentRestStartTimeMs = restStartTimeMsRef.current;
       const currentRestDurationTargetSec = restDurationTargetSecRef.current;
       const actualRestSec =
-        currentFlowState.isResting && currentRestStartTimeMs != null
+        currentFlowState.status === "resting" && currentRestStartTimeMs != null
           ? Math.max(0, Math.round((now - currentRestStartTimeMs) / 1000))
           : null;
       const flowStateToPersist =
@@ -562,16 +933,63 @@ export default function SessionScreen() {
   }, []);
 
   useEffect(() => {
-    if (!flowState?.isResting || remainingRestSec !== 0 || hasAdvancedRestRef.current) {
+    if (
+      flowState?.status !== "resting" ||
+      restEndTimeMs == null ||
+      hasStartedNextTransitionRef.current
+    ) {
       return;
     }
 
-    hasAdvancedRestRef.current = true;
-    handleAdvanceRest();
-  }, [flowState?.isResting, remainingRestSec]);
+    if (nextTransitionTimeoutRef.current != null) {
+      clearTimeout(nextTransitionTimeoutRef.current);
+      nextTransitionTimeoutRef.current = null;
+    }
+
+    const delayMs = Math.max(remainingRestMs - nextTransitionLeadMs, 0);
+
+    if (delayMs === 0) {
+      startNextTransition();
+      return;
+    }
+
+    nextTransitionTimeoutRef.current = setTimeout(() => {
+      nextTransitionTimeoutRef.current = null;
+      startNextTransition();
+    }, delayMs);
+
+    return () => {
+      if (nextTransitionTimeoutRef.current != null) {
+        clearTimeout(nextTransitionTimeoutRef.current);
+        nextTransitionTimeoutRef.current = null;
+      }
+    };
+  }, [
+    flowState?.status,
+    remainingRestMs,
+    restEndTimeMs,
+  ]);
 
   useEffect(() => {
-    if (!flowState?.isFinished || !session || hasSavedCompletedSessionRef.current) {
+    if (
+      flowState?.status !== "resting" ||
+      remainingRestSec !== 0 ||
+      hasStartedNextTransitionRef.current ||
+      hasAdvancedRestRef.current
+    ) {
+      return;
+    }
+
+    if (nextTransitionTimeoutRef.current != null) {
+      clearTimeout(nextTransitionTimeoutRef.current);
+      nextTransitionTimeoutRef.current = null;
+    }
+
+    startNextTransition();
+  }, [flowState?.status, remainingRestSec]);
+
+  useEffect(() => {
+    if (flowState?.status !== "finished" || !session || hasSavedCompletedSessionRef.current) {
       return;
     }
 
@@ -591,7 +1009,7 @@ export default function SessionScreen() {
       );
       await clearActiveSession();
     })();
-  }, [flowState?.isFinished, flowState?.sessionExercises, flowState?.workoutSets, session]);
+  }, [flowState?.status, flowState?.sessionExercises, flowState?.workoutSets, session]);
 
   function handleCurrentWeightChange(value: number) {
     const nextValue = clamp(value, 0, 60);
@@ -610,18 +1028,49 @@ export default function SessionScreen() {
   }
 
   function handleDonePress() {
-    if (!flowState || !currentSet) {
+    if (!flowState || !currentSet || flowState.status !== "active") {
       return;
     }
 
+    const isFinalSet = getUpcomingSet(flowState) == null;
     const nextState = saveSet(flowState, {
       reps: currentSet.metricType === "reps" ? mainValue : null,
       durationSec: currentSet.metricType === "duration" ? mainValue : null,
       feeling: null,
     });
 
-    const restDurationSec = clamp(currentRestValue, 0, 300);
     const now = Date.now();
+
+    if (isFinalSet) {
+      const nextActiveState = {
+        ...nextState,
+        status: "active" as const,
+      };
+
+      setFlowState(nextActiveState);
+      setRestStartTimeMs(null);
+      setRestDurationTargetSec(null);
+        setRestEndTimeMs(null);
+        setNowMs(now);
+        setIsFinalFeelingOverlay(true);
+        setShowNextTransition(false);
+        hasStartedNextTransitionRef.current = false;
+        hasAdvancedRestRef.current = false;
+        hasPlayedRestCompleteRef.current = false;
+        setShowFeelingOverlay(true);
+      if (session) {
+        void saveActiveSession({
+          session,
+          sessionExercises: nextActiveState.sessionExercises,
+          workoutSets: nextActiveState.workoutSets,
+          restStartTimeMs: null,
+          restDurationTargetSec: null,
+        });
+      }
+      return;
+    }
+
+    const restDurationSec = clamp(currentRestValue, 0, 300);
     const nextRestEndTimeMs = now + restDurationSec * 1000;
 
     setFlowState(nextState);
@@ -629,7 +1078,11 @@ export default function SessionScreen() {
     setRestDurationTargetSec(restDurationSec);
     setRestEndTimeMs(nextRestEndTimeMs);
     setNowMs(now);
+    setIsFinalFeelingOverlay(false);
+    setShowNextTransition(false);
+    hasStartedNextTransitionRef.current = false;
     hasAdvancedRestRef.current = false;
+    hasPlayedRestCompleteRef.current = false;
     setRestPhrase(getRandomRestPhrase());
     setShowFeelingOverlay(true);
     if (session) {
@@ -645,6 +1098,20 @@ export default function SessionScreen() {
 
   function handleFeelingSelect(feeling: SetFeeling) {
     setSelectedFeeling(feeling);
+
+    if (isFinalFeelingOverlay) {
+      setFlowState((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return next(updateCurrentSetFeeling({ ...current, status: "resting" }, feeling));
+      });
+      setIsFinalFeelingOverlay(false);
+      setShowFeelingOverlay(false);
+      return;
+    }
+
     setFlowState((current) =>
       current ? updateCurrentSetFeeling(current, feeling) : current,
     );
@@ -652,6 +1119,11 @@ export default function SessionScreen() {
   }
 
   function handleDismissFeeling() {
+    if (isFinalFeelingOverlay) {
+      setFlowState((current) => (current ? next(current) : current));
+      setIsFinalFeelingOverlay(false);
+    }
+
     setShowFeelingOverlay(false);
   }
 
@@ -671,9 +1143,16 @@ export default function SessionScreen() {
     setRestDurationTargetSec(null);
     setRestEndTimeMs(null);
     setNowMs(now);
+    setIsFinalFeelingOverlay(false);
+    setShowNextTransition(false);
+    if (nextTransitionAdvanceTimeoutRef.current != null) {
+      clearTimeout(nextTransitionAdvanceTimeoutRef.current);
+      nextTransitionAdvanceTimeoutRef.current = null;
+    }
+    hasStartedNextTransitionRef.current = false;
     hasAdvancedRestRef.current = false;
     setFlowState(nextFlowState);
-    if (session && !nextFlowState.isFinished) {
+    if (session && nextFlowState.status !== "finished") {
       void saveActiveSession({
         session,
         sessionExercises: nextFlowState.sessionExercises,
@@ -700,6 +1179,7 @@ export default function SessionScreen() {
     setRestEndTimeMs(nextRestEndTimeMs);
     setNowMs(now);
     hasAdvancedRestRef.current = false;
+    hasPlayedRestCompleteRef.current = false;
     setFlowState((currentFlow) => {
       if (!currentFlow) {
         return currentFlow;
@@ -718,6 +1198,85 @@ export default function SessionScreen() {
     updateUpcomingRestAndTimer((current) => current - 15);
   }
 
+  function handleSkipNextSet() {
+    if (!flowState || !session || !upcomingSet) {
+      return;
+    }
+
+    const nextFlowState = skipUpcomingSet(flowState);
+
+    setFlowState(nextFlowState);
+    void saveActiveSession({
+      session,
+      sessionExercises: nextFlowState.sessionExercises,
+      workoutSets: nextFlowState.workoutSets,
+      restStartTimeMs,
+      restDurationTargetSec,
+    });
+  }
+
+  function handleAddSet() {
+    if (!flowState || !session) {
+      return;
+    }
+
+    const nextFlowState = addSetToCurrentExercise(flowState);
+
+    setFlowState(nextFlowState);
+    void saveActiveSession({
+      session,
+      sessionExercises: nextFlowState.sessionExercises,
+      workoutSets: nextFlowState.workoutSets,
+      restStartTimeMs,
+      restDurationTargetSec,
+    });
+  }
+
+  function handleFinishEarly() {
+    if (!flowState) {
+      return;
+    }
+
+    const nextFlowState = finishEarly(flowState);
+
+    setShowFeelingOverlay(false);
+    setRestStartTimeMs(null);
+    setRestDurationTargetSec(null);
+    setRestEndTimeMs(null);
+    setNowMs(Date.now());
+    setIsFinalFeelingOverlay(false);
+    setShowNextTransition(false);
+    hasStartedNextTransitionRef.current = false;
+    hasAdvancedRestRef.current = false;
+    hasPlayedRestCompleteRef.current = false;
+    setFlowState(nextFlowState);
+    void clearActiveSession();
+  }
+
+  async function handleFinishSessionPress() {
+    if (!flowState || !session || isFinalizingSessionRef.current) {
+      return;
+    }
+
+    isFinalizingSessionRef.current = true;
+
+    const completedSession: WorkoutSession = {
+      ...session,
+      endedAt: session.endedAt ?? new Date().toISOString(),
+      feeling: sessionFeeling,
+      notes: sessionNotes.trim() || null,
+    };
+
+    setSession(completedSession);
+    await saveCompletedSession(
+      completedSession,
+      flowState.sessionExercises,
+      flowState.workoutSets,
+    );
+    await clearActiveSession();
+    router.replace("/");
+  }
+
   if (!flowState) {
     return (
       <View style={styles.container}>
@@ -726,15 +1285,74 @@ export default function SessionScreen() {
     );
   }
 
-  if (flowState.isFinished || !currentExercise || !currentSet) {
+  const completedSetsCount = flowState.workoutSets.filter((set) => set.completedAt != null).length;
+  const completedExercisesCount = flowState.sessionExercises.filter((exercise) =>
+    flowState.workoutSets
+      .filter((set) => set.sessionExerciseId === exercise.id)
+      .every((set) => set.completedAt != null),
+  ).length;
+  const sessionDuration = formatElapsedDuration(
+    session?.startedAt,
+    session?.endedAt,
+    nowMs,
+  );
+
+  if (flowState.status === "finished" || !currentExercise || !currentSet) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Workout complete</Text>
+        <View style={styles.completionScreen}>
+          <Text style={styles.title}>Workout complete</Text>
+          <Text style={styles.completionStat}>Total duration: {sessionDuration}</Text>
+          <Text style={styles.completionStat}>
+            Exercises completed: {completedExercisesCount}
+          </Text>
+          <Text style={styles.completionStat}>Sets completed: {completedSetsCount}</Text>
+
+          <View style={styles.completionSection}>
+            <Text style={styles.smallWheelLabel}>Session feeling</Text>
+            <View style={styles.feelingsGrid}>
+              {feelingOptions.map((option) => {
+                const isSelected = sessionFeeling === option.value;
+
+                return (
+                  <Pressable
+                    key={option.value}
+                    style={[
+                      styles.feelingButton,
+                      isSelected && styles.feelingButtonSelected,
+                    ]}
+                    onPress={() => setSessionFeeling(option.value)}
+                  >
+                    <Text style={styles.feelingText}>{option.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={styles.completionSection}>
+            <Text style={styles.smallWheelLabel}>Session notes</Text>
+            <TextInput
+              style={styles.notesInput}
+              value={sessionNotes}
+              onChangeText={setSessionNotes}
+              placeholder="Add a note"
+              multiline
+              textAlignVertical="top"
+            />
+          </View>
+
+          <View style={styles.bottomSection}>
+            <Pressable style={styles.primaryButton} onPress={handleFinishSessionPress}>
+              <Text style={styles.primaryButtonText}>Finish</Text>
+            </Pressable>
+          </View>
+        </View>
       </View>
     );
   }
 
-  const exerciseName = getExerciseName(currentExercise.exerciseId);
+  const exerciseName = getExerciseDisplayName(currentExercise.exerciseId);
   const totalSets = currentExercise.targetSets;
   const mainLabel = currentSet.metricType === "reps" ? "REPS" : "SECONDS";
   const mainOptions =
@@ -743,15 +1361,18 @@ export default function SessionScreen() {
       : createNumberRange(0, 300);
   const nextExerciseLabel = upcomingExercise
     ? upcomingExercise.id === currentExercise.id
-      ? `Next: ${getExerciseName(upcomingExercise.exerciseId)}`
-      : `Next exercise: ${getExerciseName(upcomingExercise.exerciseId)}`
+      ? `Next: ${getExerciseDisplayName(upcomingExercise.exerciseId)}`
+      : `Next exercise: ${getExerciseDisplayName(upcomingExercise.exerciseId)}`
     : "Next: Finish workout";
+  const nextTransitionLabel = upcomingExercise
+    ? getExerciseDisplayName(upcomingExercise.exerciseId)
+    : "Finish";
 
-  if (flowState.isResting) {
+  if (flowState.status === "resting") {
     return (
       <View style={styles.container}>
-        <View style={styles.restScreen}>
-          <View style={styles.topBar}>
+          <View style={styles.restScreen}>
+          <View style={[styles.topBar, { paddingTop: insets.top + 12 }]}>
             <Text style={styles.topBarText}>{nextExerciseLabel}</Text>
           </View>
 
@@ -770,7 +1391,24 @@ export default function SessionScreen() {
                 <Text style={styles.timerControlText}>+15s</Text>
               </Pressable>
             </View>
+
+            <View style={styles.timerControlsRow}>
+              <Pressable
+                style={[styles.timerControl, !upcomingSet && styles.timerControlDisabled]}
+                onPress={handleSkipNextSet}
+                disabled={!upcomingSet}
+              >
+                <Text style={styles.timerControlText}>Skip next set</Text>
+              </Pressable>
+              <Pressable style={styles.timerControl} onPress={handleAddSet}>
+                <Text style={styles.timerControlText}>Add set</Text>
+              </Pressable>
+            </View>
           </View>
+
+          <Pressable style={styles.secondaryAction} onPress={handleFinishEarly}>
+            <Text style={styles.secondaryActionText}>Finish early</Text>
+          </Pressable>
 
           <Pressable style={styles.skipBar} onPress={handleAdvanceRest}>
             <Text style={styles.skipBarText}>SKIP</Text>
@@ -803,6 +1441,54 @@ export default function SessionScreen() {
             </Pressable>
           </View>
         ) : null}
+        {showNextTransition ? (
+          <Animated.View
+            pointerEvents="none"
+            style={styles.nextTransition}
+          >
+            <Animated.View
+              style={[
+                styles.nextTransitionBackdrop,
+                {
+                  opacity: nextTransitionBackdropOpacity,
+                  transform: [{ scale: nextTransitionBackdropScale }],
+                },
+              ]}
+            />
+            <Animated.Text
+              style={[
+                styles.nextTransitionText,
+                {
+                  opacity: nextTransitionOpacity,
+                  transform: [{ scale: nextTransitionScale }],
+                },
+              ]}
+            >
+              NEXT
+            </Animated.Text>
+            <View style={styles.nextTransitionNameWrap}>
+              <Animated.Text
+                style={[
+                  styles.nextTransitionNameAccentText,
+                  { opacity: nextExerciseAccentOpacity },
+                ]}
+              >
+                {nextTransitionLabel}
+              </Animated.Text>
+              <Animated.Text
+                style={[
+                  styles.nextTransitionNameText,
+                  {
+                    opacity: nextExerciseOpacity,
+                    transform: [{ scale: nextExerciseScale }],
+                  },
+                ]}
+              >
+                {nextTransitionLabel}
+              </Animated.Text>
+            </View>
+          </Animated.View>
+        ) : null}
       </View>
     );
   }
@@ -810,10 +1496,20 @@ export default function SessionScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.topSection}>
-        <Text style={styles.title}>{exerciseName}</Text>
-        <Text style={styles.subtitle}>
-          Set {currentSet.setNumber} / {totalSets}
-        </Text>
+        <View style={styles.headerRow}>
+          <View style={styles.headerCopy}>
+            <View style={styles.titleRow}>
+              <Text style={styles.title}>{exerciseName}</Text>
+              <Text style={styles.subtitle}>
+                {currentSet.setNumber}/{totalSets}
+              </Text>
+            </View>
+          </View>
+          <Pressable style={styles.headerUtilityButton} onPress={handleFinishEarly}>
+            <Text style={styles.headerUtilityText}>Finish early</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.sessionTimer}>Time {sessionDuration}</Text>
 
         <View style={styles.topWheelRow}>
           <WheelNumberControl
@@ -846,6 +1542,33 @@ export default function SessionScreen() {
           <Text style={styles.primaryButtonText}>Done</Text>
         </Pressable>
       </View>
+
+      {showFeelingOverlay ? (
+        <View style={styles.overlay}>
+          <Text style={styles.overlayTitle}>How did it feel?</Text>
+          <View style={styles.feelingsGrid}>
+            {feelingOptions.map((option) => {
+              const isSelected = selectedFeeling === option.value;
+
+              return (
+                <Pressable
+                  key={option.value}
+                  style={[
+                    styles.feelingButton,
+                    isSelected && styles.feelingButtonSelected,
+                  ]}
+                  onPress={() => handleFeelingSelect(option.value)}
+                >
+                  <Text style={styles.feelingText}>{option.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable style={styles.skipButton} onPress={handleDismissFeeling}>
+            <Text style={styles.skipButtonText}>Skip</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -853,32 +1576,73 @@ export default function SessionScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
-    backgroundColor: "#fff",
+    paddingTop: 0,
+    paddingHorizontal: 20,
+    paddingBottom: 0,
+    backgroundColor: AppColors.surface,
   },
   topSection: {
-    paddingTop: 24,
+    paddingTop: 34,
+    paddingBottom: 4,
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  headerCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 10,
+    flexWrap: "wrap",
   },
   centerSection: {
     flex: 1,
     justifyContent: "center",
+    paddingVertical: 8,
   },
   bottomSection: {
-    paddingBottom: 24,
+    marginHorizontal: -20,
+    paddingBottom: 0,
   },
   title: {
-    fontSize: 34,
+    fontSize: 44,
     fontWeight: "700",
+    color: AppColors.text,
+    letterSpacing: -0.6,
   },
   subtitle: {
-    fontSize: 18,
-    marginTop: 6,
-    marginBottom: 18,
+    fontSize: 24,
+    color: AppColors.mutedText,
+    fontWeight: "700",
+  },
+  sessionTimer: {
+    fontSize: 20,
+    color: AppColors.mutedText,
+    marginTop: 10,
+    marginBottom: 12,
+  },
+  headerUtilityButton: {
+    marginTop: 12,
+    marginLeft: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: AppColors.text,
+  },
+  headerUtilityText: {
+    fontSize: 13,
+    color: AppColors.surface,
+    fontWeight: "700",
   },
   topWheelRow: {
     flexDirection: "row",
     gap: 12,
-    marginBottom: 12,
+    marginBottom: 10,
   },
   smallWheelContainer: {
     flex: 1,
@@ -886,23 +1650,25 @@ const styles = StyleSheet.create({
   },
   bigWheelContainer: {
     alignItems: "center",
+    width: "100%",
   },
   smallWheelLabel: {
-    fontSize: 13,
-    textTransform: "uppercase",
-    color: "#444",
-    marginBottom: 8,
+    fontSize: 10,
+    color: AppColors.mutedText,
+    marginBottom: 6,
+    letterSpacing: 0.2,
+    fontWeight: "500",
   },
   bigWheelLabel: {
-    fontSize: 18,
-    letterSpacing: 1,
-    marginBottom: 12,
+    fontSize: 11,
+    letterSpacing: 0.2,
+    marginBottom: 8,
+    color: AppColors.mutedText,
+    fontWeight: "500",
   },
   smallWheelViewport: {
     height: wheelRowHeight * 3,
     width: "100%",
-    borderWidth: 1,
-    borderColor: "#999",
     overflow: "hidden",
     justifyContent: "center",
     alignItems: "center",
@@ -911,9 +1677,7 @@ const styles = StyleSheet.create({
   bigWheelViewport: {
     height: wheelRowHeight * 3 + 24,
     width: "100%",
-    minWidth: 240,
-    borderWidth: 1,
-    borderColor: "#999",
+    minWidth: 260,
     overflow: "hidden",
     justifyContent: "center",
     alignItems: "center",
@@ -923,36 +1687,26 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  wheelCenterHighlight: {
-    position: "absolute",
-    top: "50%",
-    marginTop: -wheelRowHeight / 2,
-    left: 8,
-    right: 8,
-    height: wheelRowHeight,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: "#ddd",
-  },
   smallWheelSideValue: {
     height: wheelRowHeight,
-    fontSize: 20,
-    color: "#999",
-    opacity: 0.55,
+    fontSize: 17,
+    color: AppColors.mutedText,
+    opacity: 0.4,
     textAlignVertical: "center",
     lineHeight: wheelRowHeight,
   },
   smallWheelCenterValue: {
     height: wheelRowHeight,
-    fontSize: 34,
-    fontWeight: "700",
+    fontSize: 38,
+    fontWeight: "800",
     lineHeight: wheelRowHeight,
+    color: AppColors.text,
   },
   bigWheelSideValue: {
     height: wheelRowHeight + 12,
-    fontSize: 36,
-    color: "#999",
-    opacity: 0.45,
+    fontSize: 32,
+    color: AppColors.mutedText,
+    opacity: 0.24,
     lineHeight: wheelRowHeight + 12,
   },
   bigWheelCenterValue: {
@@ -960,9 +1714,33 @@ const styles = StyleSheet.create({
     fontSize: 84,
     fontWeight: "800",
     lineHeight: wheelRowHeight + 12,
+    color: AppColors.text,
   },
   restWheelGroup: {
-    marginTop: 4,
+    marginTop: 0,
+  },
+  completionScreen: {
+    flex: 1,
+    justifyContent: "center",
+    gap: 16,
+  },
+  completionSection: {
+    gap: 10,
+  },
+  completionStat: {
+    fontSize: 18,
+    color: AppColors.mutedText,
+  },
+  notesInput: {
+    minHeight: 120,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: AppColors.text,
+    backgroundColor: AppColors.surface,
   },
   restWheelRow: {
     flexDirection: "row",
@@ -979,14 +1757,15 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
   topBar: {
-    backgroundColor: "#111",
-    paddingTop: 8,
-    paddingBottom: 10,
-    paddingHorizontal: 16,
+    backgroundColor: AppColors.surface,
+    paddingBottom: 14,
+    paddingHorizontal: 18,
+    borderBottomWidth: 1,
+    borderColor: AppColors.border,
   },
   topBarText: {
-    color: "#fff",
-    fontSize: 15,
+    color: AppColors.text,
+    fontSize: 14,
     textAlign: "center",
     fontWeight: "600",
   },
@@ -994,14 +1773,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     flex: 1,
-    gap: 12,
+    gap: 10,
     paddingHorizontal: 24,
   },
   restQuote: {
     fontSize: 16,
     lineHeight: 22,
     textAlign: "center",
-    color: "#555",
+    color: AppColors.mutedText,
     maxWidth: 320,
     minHeight: 44,
   },
@@ -1015,6 +1794,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     lineHeight: 96,
     textAlign: "center",
+    color: AppColors.text,
   },
   timerControlsRow: {
     flexDirection: "row",
@@ -1024,40 +1804,57 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   timerControl: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderRadius: 999,
-    backgroundColor: "#f3f3f3",
+    backgroundColor: "#f5f5f5",
+    minWidth: 120,
+    alignItems: "center",
+  },
+  timerControlDisabled: {
+    opacity: 0.45,
   },
   timerControlText: {
     fontSize: 16,
-    color: "#444",
+    color: AppColors.text,
     fontWeight: "600",
   },
   skipBar: {
-    backgroundColor: "#111",
+    backgroundColor: AppColors.text,
     paddingVertical: 18,
     alignItems: "center",
+    marginHorizontal: 0,
   },
   skipBarText: {
-    color: "#fff",
+    color: AppColors.surface,
     fontSize: 22,
     fontWeight: "700",
   },
   primaryButton: {
-    backgroundColor: "#111",
-    paddingVertical: 18,
+    backgroundColor: AppColors.accent,
+    paddingVertical: 22,
     alignItems: "center",
+    borderRadius: 0,
+    marginHorizontal: -20,
+  },
+  secondaryAction: {
+    alignItems: "center",
+    paddingVertical: 12,
   },
   primaryButtonText: {
-    color: "#fff",
+    color: AppColors.accentText,
     fontSize: 20,
+    fontWeight: "600",
+  },
+  secondaryActionText: {
+    fontSize: 13,
+    color: AppColors.mutedText,
     fontWeight: "600",
   },
   overlay: {
     position: "absolute",
     inset: 0,
-    backgroundColor: "rgba(255,255,255,0.88)",
+    backgroundColor: "rgba(255,255,255,0.9)",
     padding: 20,
     justifyContent: "center",
   },
@@ -1066,6 +1863,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     textAlign: "center",
     marginBottom: 20,
+    color: AppColors.text,
   },
   feelingsGrid: {
     flexDirection: "row",
@@ -1075,15 +1873,20 @@ const styles = StyleSheet.create({
   feelingButton: {
     width: "48%",
     borderWidth: 1,
-    borderColor: "#999",
+    borderColor: AppColors.border,
+    borderRadius: 18,
+    backgroundColor: AppColors.surface,
     paddingVertical: 18,
     alignItems: "center",
   },
   feelingButtonSelected: {
-    backgroundColor: "#e6e6e6",
+    backgroundColor: "#f3f4f4",
+    borderColor: AppColors.text,
   },
   feelingText: {
     fontSize: 16,
+    color: AppColors.text,
+    fontWeight: "600",
   },
   skipButton: {
     alignSelf: "center",
@@ -1093,6 +1896,49 @@ const styles = StyleSheet.create({
   },
   skipButtonText: {
     fontSize: 14,
-    color: "#666",
+    color: AppColors.mutedText,
+  },
+  nextTransition: {
+    position: "absolute",
+    inset: 0,
+    backgroundColor: AppColors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  nextTransitionBackdrop: {
+    position: "absolute",
+    width: 360,
+    height: 360,
+    borderRadius: 999,
+    backgroundColor: "#ffffff",
+  },
+  nextTransitionText: {
+    fontSize: 82,
+    fontWeight: "900",
+    letterSpacing: 2.6,
+    color: AppColors.accentText,
+  },
+  nextTransitionNameWrap: {
+    position: "absolute",
+    left: 24,
+    right: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  nextTransitionNameText: {
+    fontSize: 40,
+    fontWeight: "800",
+    textAlign: "center",
+    color: AppColors.accentText,
+    letterSpacing: 0.5,
+  },
+  nextTransitionNameAccentText: {
+    position: "absolute",
+    fontSize: 40,
+    fontWeight: "800",
+    textAlign: "center",
+    color: AppColors.accentText,
+    letterSpacing: 0.5,
   },
 });

@@ -26,6 +26,7 @@ export interface RoutineExercise {
   exerciseId: string;
   order: number;
   targetSets: number;
+  targetReps?: number | null;
   targetRepsMin?: number | null;
   targetRepsMax?: number | null;
   targetDurationSec?: number | null;
@@ -40,6 +41,9 @@ export interface WorkoutSession {
   name: string;
   startedAt: string;
   endedAt?: string | null;
+  bodyweightKg?: number | null;
+  feeling?: SetFeeling | null;
+  notes?: string | null;
   createdAt: string;
 }
 
@@ -68,6 +72,8 @@ export interface WorkoutSet {
   restSecTarget?: number | null;
   restSecActual?: number | null;
   feeling?: SetFeeling | null;
+  completedAt: string | null;
+  skippedAt: string | null;
   createdAt: string;
 }
 

@@ -75,3 +75,16 @@ export async function getSavedSessionById(
 
   return savedBundles.find((bundle) => bundle.session.id === sessionId) ?? null;
 }
+
+export async function deleteSavedSessionById(sessionId: string): Promise<void> {
+  const savedBundles = await readSavedSessionBundles();
+  const nextBundles = savedBundles.filter((bundle) => bundle.session.id !== sessionId);
+
+  await writeSavedSessionBundles(nextBundles);
+}
+
+export async function replaceSavedSessions(
+  bundles: SavedSessionBundle[],
+): Promise<void> {
+  await writeSavedSessionBundles(bundles);
+}

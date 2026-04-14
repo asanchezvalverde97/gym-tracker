@@ -1,5 +1,5 @@
 import { exercises } from "../data/exercises";
-import { routineExercises } from "../data/routines";
+import type { UserSettings } from "./user-settings";
 import type {
   Exercise,
   Routine,
@@ -29,24 +29,24 @@ function findExerciseById(exerciseId: string): Exercise {
   return exercise;
 }
 
-function getRoutineExercisesForRoutine(routineId: string): RoutineExercise[] {
-  return routineExercises
-    .filter((item) => item.routineId === routineId)
-    .sort((a, b) => a.order - b.order);
-}
-
 function createSessionExercise(
   sessionId: string,
   routineExercise: RoutineExercise,
 ): SessionExercise {
+  const targetReps =
+    routineExercise.targetReps ??
+    routineExercise.targetRepsMax ??
+    routineExercise.targetRepsMin ??
+    null;
+
   return {
     id: createId("se", sessionId, routineExercise.order),
     sessionId,
     exerciseId: routineExercise.exerciseId,
     order: routineExercise.order,
     targetSets: routineExercise.targetSets,
-    targetRepsMin: routineExercise.targetRepsMin ?? null,
-    targetRepsMax: routineExercise.targetRepsMax ?? null,
+    targetRepsMin: targetReps,
+    targetRepsMax: targetReps,
     targetDurationSec: routineExercise.targetDurationSec ?? null,
     defaultWeightKg: routineExercise.defaultWeightKg ?? null,
     defaultRestSec: routineExercise.defaultRestSec ?? null,
@@ -73,11 +73,17 @@ function createWorkoutSets(
     restSecTarget: routineExercise.defaultRestSec ?? null,
     restSecActual: null,
     feeling: null,
+    completedAt: null,
+    skippedAt: null,
     createdAt: nowIso,
   }));
 }
 
-export function createSessionFromRoutine(routine: Routine): CreateSessionResult {
+export function createSessionFromRoutine(
+  routine: Routine,
+  selectedRoutineExercises: RoutineExercise[],
+  userSettings: UserSettings,
+): CreateSessionResult {
   const nowIso = new Date().toISOString();
   const sessionId = createId("session", routine.id, Date.now());
 
@@ -88,9 +94,10 @@ export function createSessionFromRoutine(routine: Routine): CreateSessionResult 
     startedAt: nowIso,
     createdAt: nowIso,
     endedAt: null,
+    bodyweightKg: userSettings.bodyweightKg ?? null,
+    feeling: null,
+    notes: null,
   };
-
-  const selectedRoutineExercises = getRoutineExercisesForRoutine(routine.id);
 
   const sessionExercises = selectedRoutineExercises.map((routineExercise) =>
     createSessionExercise(sessionId, routineExercise),

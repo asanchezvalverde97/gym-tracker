@@ -1,60 +1,28 @@
 import { useCallback, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
+import { Feather } from "@expo/vector-icons";
 
-import { routines } from "../data/routines";
+import { AppColors } from "../constants/ui";
 import { getActiveSession } from "../lib/active-session";
-import {
-  getSavedSessions,
-  type SavedSessionBundle,
-} from "../lib/completed-sessions";
-
-function formatRoutineName(name: string): string {
-  return name
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function formatSessionDate(value: string | null | undefined): string {
-  if (!value) {
-    return "Unknown date";
-  }
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "Unknown date";
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(date);
-}
+import { getHomePhrase } from "../lib/home-phrase";
 
 export default function IndexScreen() {
   const [activeSessionExists, setActiveSessionExists] = useState(false);
-  const [recentSessions, setRecentSessions] = useState<SavedSessionBundle[]>([]);
 
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
 
-      async function loadRecentSessions() {
-        const [savedSessions, activeSession] = await Promise.all([
-          getSavedSessions(),
-          getActiveSession(),
-        ]);
+      async function loadState() {
+        const activeSession = await getActiveSession();
 
         if (isActive) {
-          setRecentSessions(savedSessions);
           setActiveSessionExists(activeSession != null);
         }
       }
 
-      void loadRecentSessions();
+      void loadState();
 
       return () => {
         isActive = false;
@@ -62,157 +30,113 @@ export default function IndexScreen() {
     }, []),
   );
 
-  function handleStartWorkout(routineId?: string) {
-    const defaultRoutineId = routineId ?? routines[0]?.id;
-
-    router.push({
-      pathname: "/session",
-      params: defaultRoutineId ? { routineId: defaultRoutineId } : undefined,
-    });
+  function handleStartWorkout() {
+    router.push(activeSessionExists ? "/session" : "/start-workout");
   }
 
-  function handleContinueWorkout() {
-    router.push("/session");
+  function handleOpenProgress() {
+    router.push("/progress");
+  }
+
+  function handleOpenPlan() {
+    router.push("/plan");
+  }
+
+  function handleOpenSettings() {
+    router.push("/settings" as never);
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
-      <View style={styles.header}>
-        <Text style={styles.title}>Gym Tracker</Text>
-        <Text style={styles.subtitle}>Simple workouts, clean history.</Text>
-      </View>
+    <View style={styles.container}>
+      <View style={styles.main}>
+        <View style={styles.hero}>
+          <Text style={styles.title}>Gym Tracker</Text>
+          <Text style={styles.phrase}>{getHomePhrase()}</Text>
+        </View>
 
-      {activeSessionExists ? (
-        <Pressable style={styles.secondaryButton} onPress={handleContinueWorkout}>
-          <Text style={styles.secondaryButtonText}>Continue workout</Text>
+        <Pressable style={styles.primaryButton} onPress={handleStartWorkout}>
+          <Text style={styles.primaryButtonText}>Start Workout</Text>
         </Pressable>
-      ) : null}
-
-      <Pressable style={styles.primaryButton} onPress={handleStartWorkout}>
-        <Text style={styles.primaryButtonText}>Start workout</Text>
-      </Pressable>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Routines</Text>
-        <View style={styles.list}>
-          {routines.map((routine) => (
-            <Pressable
-              key={routine.id}
-              style={styles.routineButton}
-              onPress={() => handleStartWorkout(routine.id)}
-            >
-              <Text style={styles.listRow}>{formatRoutineName(routine.name)}</Text>
-            </Pressable>
-          ))}
-        </View>
       </View>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Recent sessions</Text>
-        <View style={styles.list}>
-          {recentSessions.length === 0 ? (
-            <Text style={styles.emptyText}>No completed sessions yet.</Text>
-          ) : (
-            recentSessions.map((bundle) => (
-              <View key={bundle.session.id} style={styles.sessionRow}>
-                <Text style={styles.sessionName}>{bundle.session.name}</Text>
-                <Text style={styles.sessionDate}>
-                  {formatSessionDate(bundle.session.endedAt ?? bundle.session.startedAt)}
-                </Text>
-              </View>
-            ))
-          )}
-        </View>
+      <View style={styles.homeNav}>
+        <Pressable style={styles.homeNavButton} onPress={handleOpenProgress}>
+          <Feather name="bar-chart-2" size={18} color={AppColors.text} />
+          <Text style={styles.homeNavLabel}>Progress</Text>
+        </Pressable>
+        <Pressable style={styles.homeNavButton} onPress={handleOpenPlan}>
+          <Feather name="list" size={18} color={AppColors.text} />
+          <Text style={styles.homeNavLabel}>Plan</Text>
+        </Pressable>
+        <Pressable style={styles.homeNavButton} onPress={handleOpenSettings}>
+          <Feather name="settings" size={18} color={AppColors.text} />
+          <Text style={styles.homeNavLabel}>Settings</Text>
+        </Pressable>
       </View>
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: AppColors.background,
   },
-  content: {
+  main: {
+    flex: 1,
     paddingHorizontal: 20,
-    paddingTop: 32,
-    paddingBottom: 40,
+    paddingTop: 40,
+    paddingBottom: 24,
+    justifyContent: "space-between",
   },
-  header: {
-    marginBottom: 28,
+  hero: {
+    gap: 22,
   },
   title: {
-    fontSize: 34,
+    fontSize: 36,
     fontWeight: "700",
-    color: "#111",
+    color: AppColors.text,
   },
-  subtitle: {
-    marginTop: 8,
-    fontSize: 16,
-    lineHeight: 22,
-    color: "#666",
+  phrase: {
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "600",
+    color: AppColors.text,
+    maxWidth: 280,
   },
   primaryButton: {
-    backgroundColor: "#111",
-    paddingVertical: 18,
+    marginHorizontal: -20,
+    backgroundColor: AppColors.accent,
+    paddingVertical: 34,
     alignItems: "center",
-    marginBottom: 32,
-  },
-  secondaryButton: {
-    paddingVertical: 16,
-    alignItems: "center",
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#111",
   },
   primaryButtonText: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "600",
-  },
-  secondaryButtonText: {
-    color: "#111",
-    fontSize: 18,
-    fontWeight: "600",
-  },
-  section: {
-    marginBottom: 32,
-  },
-  sectionTitle: {
-    fontSize: 14,
+    color: AppColors.accentText,
+    fontSize: 28,
     fontWeight: "700",
-    letterSpacing: 0.6,
+    letterSpacing: 0.2,
+  },
+  homeNav: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    borderTopWidth: 1,
+    borderColor: AppColors.border,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 16,
+    backgroundColor: AppColors.surface,
+  },
+  homeNavButton: {
+    flex: 1,
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 8,
+  },
+  homeNavLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
     textTransform: "uppercase",
-    color: "#444",
-    marginBottom: 12,
-  },
-  list: {
-    gap: 12,
-  },
-  listRow: {
-    fontSize: 18,
-    color: "#111",
-  },
-  routineButton: {
-    alignSelf: "flex-start",
-  },
-  sessionRow: {
-    gap: 2,
-  },
-  sessionName: {
-    fontSize: 18,
-    color: "#111",
-  },
-  sessionDate: {
-    fontSize: 14,
-    color: "#666",
-  },
-  emptyText: {
-    fontSize: 16,
-    color: "#666",
+    color: AppColors.text,
   },
 });

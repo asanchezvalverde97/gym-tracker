@@ -115,12 +115,6 @@ export interface WorkoutSet {
   completedAt: string | null;
   skippedAt: string | null;
   variant: SetVariant;
-  reps?: number | null;
-  durationSec?: number | null;
-  weightKg?: number | null;
-  restSecTarget?: number | null;
-  restSecActual?: number | null;
-  feeling?: SetFeeling | null;
 }
 
 export interface MotivationalQuote {

@@ -5,6 +5,7 @@ import {
   getCurrentSet,
   next,
   saveSet,
+  updateCurrentSetWeight,
   updateCurrentSetFeeling,
   type SessionFlowState,
 } from "./session-flow";
@@ -57,12 +58,6 @@ function createWorkoutSet(overrides: Partial<WorkoutSet> = {}): WorkoutSet {
     completedAt: null,
     skippedAt: null,
     variant: "normal",
-    reps: null,
-    durationSec: null,
-    weightKg: null,
-    restSecTarget: 90,
-    restSecActual: null,
-    feeling: null,
     ...overrides,
   };
 }
@@ -109,7 +104,10 @@ test("saveSet marks the current set as completed and changes phase to rest", () 
 
   assert.equal(nextState.phase, "rest");
   assert.equal(currentSet?.id, "set-1");
-  assert.equal(currentSet?.reps, 10);
+  assert.equal(currentSet?.performed.reps, 10);
+  assert.equal(currentSet?.performed.weightKg, null);
+  assert.equal(currentSet?.rest.startedAt, currentSet?.completedAt);
+  assert.equal(currentSet?.rest.endedAt, null);
   assert.equal(typeof currentSet?.completedAt, "string");
 });
 
@@ -176,5 +174,101 @@ test("updateCurrentSetFeeling only works while phase is rest-like", () => {
   const restingNextState = updateCurrentSetFeeling(restingState, 4);
 
   assert.equal(activeNextState, activeState);
-  assert.equal(getCurrentSet(restingNextState)?.feeling, 4);
+  assert.equal(getCurrentSet(restingNextState)?.performed.feeling, 4);
+});
+
+test("saveSet stores performed weight only from explicit input", () => {
+  const state = createState({
+    workoutSets: [
+      createWorkoutSet({
+        id: "set-1",
+        plan: {
+          repsMin: 8,
+          repsMax: 12,
+          durationSec: null,
+          weightKg: 24,
+          restSec: 90,
+          variant: "normal",
+        },
+      }),
+    ],
+  });
+
+  const nextState = saveSet(state, { reps: 10 });
+
+  assert.equal(getCurrentSet(nextState)?.performed.weightKg, null);
+});
+
+test("updateCurrentSetWeight propagates to later pending sets in the same exercise", () => {
+  const workoutSets = [
+    createWorkoutSet({
+      id: "set-1",
+      setNumber: 1,
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 20, restSec: 90, variant: "normal" },
+    }),
+    createWorkoutSet({
+      id: "set-2",
+      setNumber: 2,
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 20, restSec: 90, variant: "normal" },
+    }),
+    createWorkoutSet({
+      id: "set-3",
+      setNumber: 3,
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 20, restSec: 90, variant: "normal" },
+    }),
+  ];
+  const state = createState({ workoutSets });
+
+  const nextState = updateCurrentSetWeight(state, 24);
+
+  assert.equal(getCurrentSet(nextState)?.plan.weightKg, 24);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-2")?.plan.weightKg, 24);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-3")?.plan.weightKg, 24);
+});
+
+test("updateCurrentSetWeight does not overwrite completed sets or other exercises", () => {
+  const sessionExercises = [
+    createSessionExercise({ id: "exercise-1", order: 1, targetSets: 3 }),
+    createSessionExercise({ id: "exercise-2", exerciseId: "squat", order: 2, targetSets: 1 }),
+  ];
+  const workoutSets = [
+    createWorkoutSet({
+      id: "set-1",
+      sessionExerciseId: "exercise-1",
+      setNumber: 1,
+      status: "completed",
+      completedAt: "2026-04-13T10:05:00.000Z",
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 18, restSec: 90, variant: "normal" },
+      performed: { reps: 10, durationSec: null, weightKg: 18, feeling: null },
+    }),
+    createWorkoutSet({
+      id: "set-2",
+      sessionExerciseId: "exercise-1",
+      setNumber: 2,
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 20, restSec: 90, variant: "normal" },
+    }),
+    createWorkoutSet({
+      id: "set-3",
+      sessionExerciseId: "exercise-1",
+      setNumber: 3,
+      status: "skipped",
+      skippedAt: "2026-04-13T10:07:00.000Z",
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 20, restSec: 90, variant: "normal" },
+    }),
+    createWorkoutSet({
+      id: "set-4",
+      sessionExerciseId: "exercise-2",
+      setNumber: 1,
+      plan: { repsMin: 8, repsMax: 12, durationSec: null, weightKg: 30, restSec: 90, variant: "normal" },
+    }),
+  ];
+  const state = createSessionFlowState(sessionExercises, workoutSets, "in_set");
+
+  const nextState = updateCurrentSetWeight(state, 24);
+
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-1")?.plan.weightKg, 18);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-2")?.plan.weightKg, 24);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-3")?.plan.weightKg, 20);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-4")?.plan.weightKg, 30);
+  assert.equal(nextState.workoutSets.find((set) => set.id === "set-1")?.performed.weightKg, 18);
 });

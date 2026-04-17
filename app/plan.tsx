@@ -7,6 +7,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppColors } from "../constants/ui";
@@ -37,7 +38,15 @@ export default function PlanScreen() {
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
-        <Text style={styles.title}>Plan</Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Plan</Text>
+          <Pressable
+            style={styles.scheduleButton}
+            onPress={() => router.push("/weekly-schedule")}
+          >
+            <Text style={styles.scheduleButtonText}>Weekly schedule</Text>
+          </Pressable>
+        </View>
         <View style={styles.segmentedControl}>
           {tabs.map((tab) => {
             const isActive = activeTab === tab.key;
@@ -97,9 +106,29 @@ const styles = StyleSheet.create({
     borderColor: AppColors.border,
     gap: 14,
   },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
   title: {
     fontSize: 32,
     fontWeight: "700",
+    color: AppColors.text,
+  },
+  scheduleButton: {
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: AppColors.surface,
+  },
+  scheduleButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
     color: AppColors.text,
   },
   segmentedControl: {

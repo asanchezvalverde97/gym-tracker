@@ -40,10 +40,17 @@ export function MiniWheelControl({
   const currentIndex = getNearestIndex(options, value);
   const [dragOffset, setDragOffset] = useState(0);
   const currentIndexRef = useRef(currentIndex);
+  const optionsRef = useRef(options);
+  const onChangeRef = useRef(onChange);
 
   useEffect(() => {
     currentIndexRef.current = currentIndex;
   }, [currentIndex]);
+
+  useEffect(() => {
+    optionsRef.current = options;
+    onChangeRef.current = onChange;
+  }, [onChange, options]);
 
   const displayValue = formatValue ?? ((item: number) => String(item));
   const previousValue = options[currentIndex - 1];
@@ -60,14 +67,15 @@ export function MiniWheelControl({
       },
       onPanResponderRelease: (_, gestureState) => {
         const stepDelta = Math.round(-gestureState.dy / wheelRowHeight);
+        const currentOptions = optionsRef.current;
         const nextIndex = clamp(
           currentIndexRef.current + stepDelta,
           0,
-          options.length - 1,
+          currentOptions.length - 1,
         );
 
         setDragOffset(0);
-        onChange(options[nextIndex]);
+        onChangeRef.current(currentOptions[nextIndex]);
       },
       onPanResponderTerminate: () => {
         setDragOffset(0);

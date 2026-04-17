@@ -13,6 +13,11 @@ import {
   formatWorkoutDisplayName,
   getExerciseDisplayName,
 } from "../../lib/display-name";
+import {
+  buildExerciseComparisonSummary,
+  findLastPreviousExerciseSummary,
+  getComparisonIndicator,
+} from "../../lib/exercise-comparison";
 import type { WorkoutSet } from "../../types/workout";
 
 const defaultBodyweightKg = 72;
@@ -104,7 +109,7 @@ function getFeelingLabel(feeling: SavedSessionBundle["session"]["feeling"]): str
   }
 }
 
-function getSetFeelingLabel(feeling: WorkoutSet["feeling"]): string | null {
+function getSetFeelingLabel(feeling: WorkoutSet["performed"]["feeling"]): string | null {
   switch (feeling) {
     case 1:
       return "Bad";
@@ -121,16 +126,17 @@ function getSetFeelingLabel(feeling: WorkoutSet["feeling"]): string | null {
 
 function formatSetMetric(set: WorkoutSet): string {
   if (set.metricType === "duration") {
-    return `${set.durationSec ?? 0}s`;
+    return `${set.performed.durationSec ?? 0}s`;
   }
 
-  if (set.weightKg != null && Number.isFinite(set.weightKg)) {
-    return `${set.weightKg} kg x ${set.reps ?? 0}`;
+  if (set.performed.weightKg != null && Number.isFinite(set.performed.weightKg)) {
+    return `${set.performed.weightKg} kg x ${set.performed.reps ?? 0}`;
   }
 
-  return `${set.reps ?? 0} reps`;
+  return `${set.performed.reps ?? 0} reps`;
 }
 
+/* eslint-disable @typescript-eslint/no-unused-vars */
 function getComparisonTone(delta: number): "positive" | "negative" | "neutral" {
   if (delta > 0) {
     return "positive";
@@ -174,7 +180,7 @@ function getExerciseSummary(
 
   if (sets[0].metricType === "duration") {
     const durations = sets
-      .map((set) => set.durationSec ?? null)
+      .map((set) => set.performed.durationSec ?? null)
       .filter((value): value is number => value != null && Number.isFinite(value));
 
     if (durations.length === 0) {
@@ -192,7 +198,7 @@ function getExerciseSummary(
   }
 
   const reps = sets
-    .map((set) => set.reps ?? null)
+    .map((set) => set.performed.reps ?? null)
     .filter((value): value is number => value != null && Number.isFinite(value));
 
   if (reps.length === 0) {
@@ -213,12 +219,16 @@ function getExerciseSummary(
   }
 
   const weightValues = sets
-    .map((set) => set.weightKg ?? null)
+    .map((set) => set.performed.weightKg ?? null)
     .filter((value): value is number => value != null && Number.isFinite(value));
 
   if (weightValues.length > 0) {
     const weightedSets = sets.filter(
-      (set) => set.weightKg != null && set.reps != null && Number.isFinite(set.weightKg) && Number.isFinite(set.reps),
+      (set) =>
+        set.performed.weightKg != null &&
+        set.performed.reps != null &&
+        Number.isFinite(set.performed.weightKg) &&
+        Number.isFinite(set.performed.reps),
     );
     const uniqueWeights = Array.from(new Set(weightValues.map((value) => Math.round(value))));
     const weightDisplay = `${uniqueWeights.join("/")} kg`;
@@ -229,8 +239,8 @@ function getExerciseSummary(
       bestSet: Math.max(...reps),
       bestSetWeightKg: Math.max(
         ...weightedSets
-          .filter((set) => (set.reps ?? 0) === Math.max(...reps))
-          .map((set) => set.weightKg ?? 0),
+          .filter((set) => (set.performed.reps ?? 0) === Math.max(...reps))
+          .map((set) => set.performed.weightKg ?? 0),
       ),
       mainDisplay: `${weightDisplay} · ${reps.join("/")}`,
       referenceWeightKg: weightValues.reduce((total, value) => total + value, 0) / weightValues.length,
@@ -470,6 +480,7 @@ function formatBestSetText(summary: ExerciseMetricSummary): string {
 
   return `Best set: ${Math.round(summary.bestSet)} reps`;
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 function formatExportSummary(
   bundle: SavedSessionBundle,
@@ -491,14 +502,14 @@ function formatExportSetLine(set: WorkoutSet): string | null {
   }
 
   if (set.metricType === "duration") {
-    return `Set ${set.setNumber}: ${set.durationSec ?? 0}s`;
+    return `Set ${set.setNumber}: ${set.performed.durationSec ?? 0}s`;
   }
 
-  if (set.weightKg != null && Number.isFinite(set.weightKg)) {
-    return `Set ${set.setNumber}: ${set.weightKg} kg x ${set.reps ?? 0}`;
+  if (set.performed.weightKg != null && Number.isFinite(set.performed.weightKg)) {
+    return `Set ${set.setNumber}: ${set.performed.weightKg} kg x ${set.performed.reps ?? 0}`;
   }
 
-  return `Set ${set.setNumber}: ${set.reps ?? 0} reps`;
+  return `Set ${set.setNumber}: ${set.performed.reps ?? 0} reps`;
 }
 
 function buildSessionExportText(bundle: SavedSessionBundle): string {
@@ -638,22 +649,17 @@ export default function HistoryDetailScreen() {
             const sets = bundle.workoutSets
               .filter((set) => set.sessionExerciseId === sessionExercise.id)
               .sort((a, b) => a.setNumber - b.setNumber);
-            const summary = getExerciseSummary(
-              bundle,
-              sessionExercise.id,
-              sessionExercise.exerciseId,
-            );
-            const historicalSummaries = getHistoricalSummaries(
+            const comparisonSummary = buildExerciseComparisonSummary(sets);
+            const previousSummary = findLastPreviousExerciseSummary(
               historyBundles,
-              bundle,
               sessionExercise.exerciseId,
-            ).filter((item) => item.kind === summary?.kind);
-            const lastSummary = historicalSummaries[0] ?? null;
-            const averageSummary = getAverageSummary(historicalSummaries.slice(0, 5));
-            const bestSummary = getBestSummary(historicalSummaries);
-            const vsLast = summary ? getVsLastText(summary, lastSummary) : null;
-            const vsAverage = summary ? getVsAverageText(summary, averageSummary) : null;
-            const vsBest = summary ? getVsBestText(summary, bestSummary) : null;
+              {
+                beforeTimeMs: new Date(
+                  bundle.session.endedAt ?? bundle.session.startedAt,
+                ).getTime(),
+                excludeSessionId: bundle.session.id,
+              },
+            );
 
             return (
               <Pressable
@@ -665,71 +671,40 @@ export default function HistoryDetailScreen() {
                   {getExerciseDisplayName(sessionExercise.exerciseId)}
                 </Text>
 
-                {summary ? (
+                {comparisonSummary ? (
                   <View style={styles.progressCard}>
                     <Text style={styles.progressLabel}>Progress</Text>
-                    <Text style={styles.progressValue}>{summary.mainDisplay}</Text>
-                    <Text style={styles.progressMeta}>{formatBestSetText(summary)}</Text>
-
-                    {vsLast ? (
-                      <View style={styles.progressRow}>
-                        <Text style={styles.progressRowLabel}>vs last</Text>
-                        <Text
-                          style={[
-                            styles.progressRowValue,
-                            vsLast.tone === "positive"
-                              ? styles.progressPositive
-                              : vsLast.tone === "negative"
-                                ? styles.progressNegative
-                                : styles.progressNeutral,
-                          ]}
-                        >
-                          {vsLast.text}
+                    {previousSummary ? (
+                      <>
+                        <Text style={styles.progressValue}>
+                          Last: {previousSummary.summaryText}
                         </Text>
-                      </View>
-                    ) : null}
-
-                    {vsAverage ? (
-                      <View style={styles.progressRow}>
-                        <Text style={styles.progressRowLabel}>vs avg</Text>
-                        <Text
-                          style={[
-                            styles.progressRowValue,
-                            vsAverage.tone === "positive"
-                              ? styles.progressPositive
-                              : vsAverage.tone === "negative"
-                                ? styles.progressNegative
-                                : styles.progressNeutral,
-                          ]}
-                        >
-                          {vsAverage.text}
-                        </Text>
-                      </View>
-                    ) : null}
-
-                    {vsBest ? (
-                      <View style={styles.progressRow}>
-                        <Text style={styles.progressRowLabel}>best</Text>
-                        <Text
-                          style={[
-                            styles.progressRowValue,
-                            vsBest.tone === "positive"
-                              ? styles.progressPositive
-                              : vsBest.tone === "negative"
-                                ? styles.progressNegative
-                                : styles.progressNeutral,
-                          ]}
-                        >
-                          {vsBest.text}
-                        </Text>
-                      </View>
-                    ) : null}
+                        <View style={styles.progressIndicatorRow}>
+                          <Text style={styles.progressIndicatorText}>
+                            {comparisonSummary.primaryLabel}:{" "}
+                            {getComparisonIndicator(
+                              comparisonSummary.primaryTotal,
+                              previousSummary.primaryTotal,
+                            )}
+                          </Text>
+                          <Text style={styles.progressIndicatorText}>
+                            Weight:{" "}
+                            {getComparisonIndicator(
+                              comparisonSummary.maxWeight,
+                              previousSummary.maxWeight,
+                            )}
+                          </Text>
+                        </View>
+                      </>
+                    ) : (
+                      <Text style={styles.progressValue}>New</Text>
+                    )}
                   </View>
                 ) : null}
 
                 <View style={styles.setList}>
                   {sets.map((set) => {
-                    const setFeelingLabel = getSetFeelingLabel(set.feeling);
+                    const setFeelingLabel = getSetFeelingLabel(set.performed.feeling);
                     const isSkipped = set.skippedAt != null;
 
                     return (

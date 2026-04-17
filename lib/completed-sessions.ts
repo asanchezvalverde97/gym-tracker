@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
   CompletedWorkoutSession,
   SessionExercise,
+  SetFeeling,
   WorkoutSet,
 } from "../types/workout";
 
@@ -17,6 +18,68 @@ export interface CompletedSessionBundle {
 
 export type SavedSessionBundle = CompletedSessionBundle;
 
+type LegacyWorkoutSet = Partial<WorkoutSet> & {
+  reps?: number | null;
+  durationSec?: number | null;
+  weightKg?: number | null;
+  restSecTarget?: number | null;
+  restSecActual?: number | null;
+  feeling?: SetFeeling | null;
+};
+
+function normalizeWorkoutSet(set: WorkoutSet | LegacyWorkoutSet): WorkoutSet {
+  const legacySet = set as LegacyWorkoutSet;
+  const normalizedPerformed = {
+    reps: set.performed?.reps ?? legacySet.reps ?? null,
+    durationSec: set.performed?.durationSec ?? legacySet.durationSec ?? null,
+    weightKg: set.performed?.weightKg ?? legacySet.weightKg ?? null,
+    feeling: set.performed?.feeling ?? legacySet.feeling ?? null,
+  };
+  const normalizedRest = {
+    targetSec: set.rest?.targetSec ?? legacySet.restSecTarget ?? set.plan?.restSec ?? null,
+    actualSec: set.rest?.actualSec ?? legacySet.restSecActual ?? null,
+    startedAt: set.rest?.startedAt ?? set.completedAt ?? null,
+    endedAt: set.rest?.endedAt ?? null,
+  };
+
+  return {
+    id: set.id ?? "",
+    sessionExerciseId: set.sessionExerciseId ?? "",
+    setNumber: set.setNumber ?? 0,
+    metricType: set.metricType ?? "reps",
+    status:
+      set.status ??
+      (set.skippedAt != null ? "skipped" : set.completedAt != null ? "completed" : "pending"),
+    plan: {
+      repsMin: set.plan?.repsMin ?? null,
+      repsMax: set.plan?.repsMax ?? null,
+      durationSec: set.plan?.durationSec ?? null,
+      weightKg: set.plan?.weightKg ?? null,
+      restSec: set.plan?.restSec ?? normalizedRest.targetSec,
+      variant: set.plan?.variant ?? set.variant ?? "normal",
+    },
+    performed: normalizedPerformed,
+    rest: normalizedRest,
+    createdAt: set.createdAt ?? set.completedAt ?? set.skippedAt ?? new Date(0).toISOString(),
+    completedAt: set.completedAt ?? null,
+    skippedAt: set.skippedAt ?? null,
+    variant: set.variant ?? set.plan?.variant ?? "normal",
+  };
+}
+
+export function normalizeCompletedSessionBundle(
+  bundle: CompletedSessionBundle,
+): CompletedSessionBundle {
+  return {
+    kind: "completed_session",
+    session: bundle.session,
+    sessionExercises: bundle.sessionExercises,
+    workoutSets: Array.isArray(bundle.workoutSets)
+      ? bundle.workoutSets.map((set) => normalizeWorkoutSet(set))
+      : [],
+  };
+}
+
 async function readSavedSessionBundles(): Promise<CompletedSessionBundle[]> {
   const rawValue = await AsyncStorage.getItem(COMPLETED_SESSIONS_STORAGE_KEY);
 
@@ -26,7 +89,9 @@ async function readSavedSessionBundles(): Promise<CompletedSessionBundle[]> {
 
   try {
     const parsedValue = JSON.parse(rawValue) as CompletedSessionBundle[];
-    return Array.isArray(parsedValue) ? parsedValue : [];
+    return Array.isArray(parsedValue)
+      ? parsedValue.map(normalizeCompletedSessionBundle)
+      : [];
   } catch {
     return [];
   }
@@ -37,7 +102,7 @@ async function writeSavedSessionBundles(
 ): Promise<void> {
   await AsyncStorage.setItem(
     COMPLETED_SESSIONS_STORAGE_KEY,
-    JSON.stringify(bundles),
+    JSON.stringify(bundles.map(normalizeCompletedSessionBundle)),
   );
 }
 
@@ -47,12 +112,12 @@ export async function saveCompletedSession(
   workoutSets: WorkoutSet[],
 ): Promise<void> {
   const savedBundles = await readSavedSessionBundles();
-  const nextBundle: CompletedSessionBundle = {
+  const nextBundle = normalizeCompletedSessionBundle({
     kind: "completed_session",
     session,
     sessionExercises,
     workoutSets,
-  };
+  });
   const existingIndex = savedBundles.findIndex(
     (bundle) => bundle.session.id === session.id,
   );

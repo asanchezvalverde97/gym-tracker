@@ -1,10 +1,8 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -15,71 +13,47 @@ import { StatsScreenContent } from "./stats";
 
 type ProgressTab = "stats" | "history";
 
-const tabs: Array<{ key: ProgressTab; label: string }> = [
-  { key: "stats", label: "Stats" },
+const tabs: { key: ProgressTab; label: string }[] = [
   { key: "history", label: "History" },
+  { key: "stats", label: "Stats" },
 ];
 
 export default function ProgressScreen() {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
-  const scrollRef = useRef<ScrollView | null>(null);
-  const [activeTab, setActiveTab] = useState<ProgressTab>("stats");
-
-  function handleSelectTab(tab: ProgressTab) {
-    setActiveTab(tab);
-    scrollRef.current?.scrollTo({
-      x: tab === "stats" ? 0 : width,
-      animated: true,
-    });
-  }
+  const [activeTab, setActiveTab] = useState<ProgressTab>("history");
 
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <Text style={styles.title}>Progress</Text>
-        <View style={styles.segmentedControl}>
-          {tabs.map((tab) => {
-            const isActive = activeTab === tab.key;
-
-            return (
-              <Pressable
-                key={tab.key}
-                style={[styles.segmentButton, isActive && styles.segmentButtonActive]}
-                onPress={() => handleSelectTab(tab.key)}
-              >
-                <Text
-                  style={[
-                    styles.segmentButtonText,
-                    isActive && styles.segmentButtonTextActive,
-                  ]}
-                >
-                  {tab.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
       </View>
 
-      <ScrollView
-        ref={scrollRef}
-        horizontal
-        pagingEnabled
-        showsHorizontalScrollIndicator={false}
-        scrollEventThrottle={16}
-        onMomentumScrollEnd={(event) => {
-          const nextIndex = Math.round(event.nativeEvent.contentOffset.x / width);
-          setActiveTab(nextIndex === 0 ? "stats" : "history");
-        }}
-      >
-        <View style={{ width }}>
-          <StatsScreenContent embedded />
-        </View>
-        <View style={{ width }}>
-          <HistoryScreenContent embedded />
-        </View>
-      </ScrollView>
+      <View style={styles.content}>
+        {activeTab === "history" ? <HistoryScreenContent /> : <StatsScreenContent embedded />}
+      </View>
+
+      <View style={styles.bottomTabBar}>
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.key;
+
+          return (
+            <Pressable
+              key={tab.key}
+              style={[styles.bottomTabButton, isActive && styles.bottomTabButtonActive]}
+              onPress={() => setActiveTab(tab.key)}
+            >
+              <Text
+                style={[
+                  styles.bottomTabButtonText,
+                  isActive && styles.bottomTabButtonTextActive,
+                ]}
+              >
+                {tab.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
@@ -92,38 +66,41 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: 20,
     paddingTop: 20,
-    paddingBottom: 10,
+    paddingBottom: 12,
     borderBottomWidth: 1,
     borderColor: AppColors.border,
-    gap: 14,
   },
   title: {
     fontSize: 32,
     fontWeight: "700",
     color: AppColors.text,
   },
-  segmentedControl: {
-    flexDirection: "row",
-    borderWidth: 1,
-    borderColor: AppColors.border,
-  },
-  segmentButton: {
+  content: {
     flex: 1,
-    paddingVertical: 10,
+  },
+  bottomTabBar: {
+    flexDirection: "row",
+    borderTopWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
+  },
+  bottomTabButton: {
+    flex: 1,
+    paddingVertical: 14,
     alignItems: "center",
     backgroundColor: AppColors.surface,
   },
-  segmentButtonActive: {
+  bottomTabButtonActive: {
     backgroundColor: AppColors.text,
   },
-  segmentButtonText: {
+  bottomTabButtonText: {
     fontSize: 13,
     fontWeight: "700",
     color: AppColors.mutedText,
     textTransform: "uppercase",
     letterSpacing: 0.8,
   },
-  segmentButtonTextActive: {
+  bottomTabButtonTextActive: {
     color: AppColors.surface,
   },
 });

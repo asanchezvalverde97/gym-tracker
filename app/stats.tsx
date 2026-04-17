@@ -9,6 +9,7 @@ import {
 } from "../lib/completed-sessions";
 import {
   clearSeededCompletedSessions,
+  importPastCompletedSessions,
   seedCompletedSessions,
 } from "../lib/dev-seed-completed-sessions";
 
@@ -222,6 +223,17 @@ export function StatsScreenContent({
         <View style={styles.devSection}>
           <Text style={styles.devTitle}>Development</Text>
           <View style={styles.devActions}>
+            <Pressable
+              style={styles.devButton}
+              onPress={() => {
+                void (async () => {
+                  await importPastCompletedSessions();
+                  await loadSessions();
+                })();
+              }}
+            >
+              <Text style={styles.devButtonText}>Import past sessions</Text>
+            </Pressable>
             <Pressable
               style={styles.devButton}
               onPress={() => {

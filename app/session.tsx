@@ -10,7 +10,7 @@ import {
   View,
 } from "react-native";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
-import { router, useLocalSearchParams } from "expo-router";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppColors } from "../constants/ui";
@@ -19,6 +19,11 @@ import {
   createSessionFromRoutine,
   type CreateSessionResult,
 } from "../lib/create-session";
+import {
+  fromRestParts,
+  getRestSecondsOptions,
+  toRestParts,
+} from "../lib/rest-time";
 import { getRoutineBundleById, getRoutineBundles } from "../lib/routines-storage";
 import {
   clearStartWorkoutDraft,
@@ -31,7 +36,17 @@ import {
   getActiveSession,
   saveActiveSession,
 } from "../lib/active-session";
-import { saveCompletedSession } from "../lib/completed-sessions";
+import {
+  getSavedSessions,
+  saveCompletedSession,
+  type SavedSessionBundle,
+} from "../lib/completed-sessions";
+import {
+  buildExerciseComparisonSummary,
+  findLastPreviousExerciseSummary,
+  getComparisonIndicator,
+  getExerciseSetsForSessionExercise,
+} from "../lib/exercise-comparison";
 import {
   addSetToCurrentExercise,
   createSessionFlowSnapshot,
@@ -83,8 +98,8 @@ const restPhrases = [
   "Constancia > motivacion",
 ];
 
-const secondsOptions = Array.from({ length: 12 }, (_, index) => index * 5);
 const wheelRowHeight = 52;
+const maxEditableRestSeconds = 330;
 
 async function createInitialSessionData(
   routineId?: string,
@@ -312,14 +327,14 @@ function getInitialMainValue(
   targetRepsMin?: number | null,
   targetRepsMax?: number | null,
   targetDurationSec?: number | null,
-  reps?: number | null,
-  durationSec?: number | null,
+  performedReps?: number | null,
+  performedDurationSec?: number | null,
 ): number {
   if (metricType === "reps") {
-    return clamp(targetRepsMax ?? targetRepsMin ?? reps ?? 0, 0, 30);
+    return clamp(targetRepsMax ?? targetRepsMin ?? performedReps ?? 0, 0, 30);
   }
 
-  return clamp(targetDurationSec ?? durationSec ?? 0, 0, 300);
+  return clamp(targetDurationSec ?? performedDurationSec ?? 0, 0, 300);
 }
 
 function formatCountdown(seconds: number): string {
@@ -362,25 +377,41 @@ function formatElapsedDuration(
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatWeightLabel(weightKg: number | null | undefined): string {
+  return `${weightKg ?? 0} kg`;
+}
+
+function formatShortSetTarget(params: {
+  metricType: "reps" | "duration";
+  targetRepsMin?: number | null;
+  targetRepsMax?: number | null;
+  targetDurationSec?: number | null;
+}): string | null {
+  if (params.metricType === "reps") {
+    if (params.targetRepsMin != null && params.targetRepsMax != null) {
+      return `${params.targetRepsMin}-${params.targetRepsMax}`;
+    }
+
+    if (params.targetRepsMax != null) {
+      return String(params.targetRepsMax);
+    }
+
+    if (params.targetRepsMin != null) {
+      return String(params.targetRepsMin);
+    }
+
+    return null;
+  }
+
+  if (params.targetDurationSec != null) {
+    return `${params.targetDurationSec}s`;
+  }
+
+  return null;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
-}
-
-function toRestParts(totalSeconds: number): { minutes: number; seconds: number } {
-  const safe = clamp(totalSeconds, 0, 300);
-  const minutes = Math.floor(safe / 60);
-  const remainder = safe % 60;
-  const snappedSeconds = secondsOptions.reduce((closest, option) => {
-    return Math.abs(option - remainder) < Math.abs(closest - remainder)
-      ? option
-      : closest;
-  }, 0);
-
-  return { minutes, seconds: snappedSeconds };
-}
-
-function fromRestParts(minutes: number, seconds: number): number {
-  return clamp(minutes * 60 + seconds, 0, 300);
 }
 
 function getNearestIndex(options: number[], value: number): number {
@@ -453,10 +484,17 @@ function WheelNumberControl({
   const currentIndex = getNearestIndex(options, value);
   const [dragOffset, setDragOffset] = useState(0);
   const currentIndexRef = useRef(currentIndex);
+  const optionsRef = useRef(options);
+  const onChangeRef = useRef(onChange);
 
   useEffect(() => {
     currentIndexRef.current = currentIndex;
   }, [currentIndex]);
+
+  useEffect(() => {
+    optionsRef.current = options;
+    onChangeRef.current = onChange;
+  }, [onChange, options]);
 
   const displayValue = formatValue ?? ((item: number) => String(item));
   const previousValue = options[currentIndex - 1];
@@ -473,14 +511,15 @@ function WheelNumberControl({
       },
       onPanResponderRelease: (_, gestureState) => {
         const stepDelta = Math.round(-gestureState.dy / wheelRowHeight);
+        const currentOptions = optionsRef.current;
         const nextIndex = clamp(
           currentIndexRef.current + stepDelta,
           0,
-          options.length - 1,
+          currentOptions.length - 1,
         );
 
         setDragOffset(0);
-        onChange(options[nextIndex]);
+        onChangeRef.current(currentOptions[nextIndex]);
       },
       onPanResponderTerminate: () => {
         setDragOffset(0);
@@ -516,32 +555,25 @@ function WheelNumberControl({
 }
 
 function RestWheelControl({
+  controlKeyPrefix,
   label,
   totalSeconds,
   onChange,
 }: {
+  controlKeyPrefix: string;
   label: string;
   totalSeconds: number;
   onChange: (value: number) => void;
 }) {
-  const initialParts = toRestParts(totalSeconds);
-  const [minutesValue, setMinutesValue] = useState(initialParts.minutes);
-  const [secondsValue, setSecondsValue] = useState(initialParts.seconds);
-
-  useEffect(() => {
-    const nextParts = toRestParts(totalSeconds);
-    setMinutesValue(nextParts.minutes);
-    setSecondsValue(nextParts.seconds);
-  }, [totalSeconds]);
+  const { minutes, seconds } = toRestParts(totalSeconds);
+  const secondOptions = getRestSecondsOptions();
 
   function handleMinutesChange(minutes: number) {
-    setMinutesValue(minutes);
-    onChange(fromRestParts(minutes, secondsValue));
+    onChange(fromRestParts(minutes, seconds));
   }
 
   function handleSecondsChange(seconds: number) {
-    setSecondsValue(seconds);
-    onChange(fromRestParts(minutesValue, seconds));
+    onChange(fromRestParts(minutes, seconds));
   }
 
   return (
@@ -549,16 +581,18 @@ function RestWheelControl({
       <Text style={styles.smallWheelLabel}>{label}</Text>
       <View style={styles.restWheelRow}>
         <WheelNumberControl
+          key={`${controlKeyPrefix}_rest_min`}
           label="Min"
-          value={minutesValue}
+          value={minutes}
           options={createNumberRange(0, 5)}
           onChange={handleMinutesChange}
           formatValue={(value) => String(value)}
         />
         <WheelNumberControl
+          key={`${controlKeyPrefix}_rest_sec`}
           label="Sec"
-          value={secondsValue}
-          options={secondsOptions}
+          value={seconds}
+          options={secondOptions}
           onChange={handleSecondsChange}
           formatValue={(value) => String(value).padStart(2, "0")}
         />
@@ -596,6 +630,8 @@ export default function SessionScreen() {
   const [showNextTransition, setShowNextTransition] = useState(false);
   const [sessionFeeling, setSessionFeeling] = useState<SetFeeling | null>(null);
   const [sessionNotes, setSessionNotes] = useState("");
+  const [showWeightAppliedHint, setShowWeightAppliedHint] = useState(false);
+  const [historyBundles, setHistoryBundles] = useState<SavedSessionBundle[]>([]);
   const hasAdvancedRestRef = useRef(false);
   const hasPlayedRestCompleteRef = useRef(false);
   const hasStartedNextTransitionRef = useRef(false);
@@ -624,6 +660,24 @@ export default function SessionScreen() {
   const remainingRestMs = getRemainingRestMilliseconds(restEndTimeMs, nowMs);
   const nextTransitionLeadMs = 1200;
   const nextTransitionDurationMs = 1200;
+
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+
+      void (async () => {
+        const savedBundles = await getSavedSessions();
+
+        if (isActive) {
+          setHistoryBundles(savedBundles);
+        }
+      })();
+
+      return () => {
+        isActive = false;
+      };
+    }, []),
+  );
 
   function startNextTransition() {
     if (hasStartedNextTransitionRef.current) {
@@ -877,6 +931,7 @@ export default function SessionScreen() {
         hasStartedNextTransitionRef.current = false;
         setSessionFeeling(null);
         setSessionNotes("");
+        setShowWeightAppliedHint(false);
         hasAdvancedRestRef.current = false;
         hasPlayedRestCompleteRef.current = false;
         hasSavedCompletedSessionRef.current = false;
@@ -902,13 +957,26 @@ export default function SessionScreen() {
         currentExercise.targetRepsMin,
         currentExercise.targetRepsMax,
         currentExercise.targetDurationSec,
-        currentSet.reps,
-        currentSet.durationSec,
+        currentSet.performed.reps,
+        currentSet.performed.durationSec,
       ),
     );
-    setCurrentWeightValue(clamp(currentSet.weightKg ?? 0, 0, 60));
-    setCurrentRestValue(clamp(currentSet.restSecTarget ?? 0, 0, 300));
+    setCurrentWeightValue(clamp(currentSet.plan.weightKg ?? 0, 0, 60));
+    setCurrentRestValue(clamp(currentSet.rest.targetSec ?? 0, 0, maxEditableRestSeconds));
+    setShowWeightAppliedHint(false);
   }, [currentExercise?.id, currentSet?.id]);
+
+  useEffect(() => {
+    if (!showWeightAppliedHint) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setShowWeightAppliedHint(false);
+    }, 1800);
+
+    return () => clearTimeout(timeout);
+  }, [showWeightAppliedHint]);
 
   useEffect(() => {
     if (!isRestPhase(flowState?.phase ?? "finished") && !isFinalFeelingOverlay) {
@@ -935,7 +1003,7 @@ export default function SessionScreen() {
   }, [
     flowState?.phase,
     currentSet?.id,
-    currentSet?.restSecTarget,
+    currentSet?.rest.targetSec,
     isFinalFeelingOverlay,
     restDurationTargetSec,
     restStartTimeMs,
@@ -1102,13 +1170,14 @@ export default function SessionScreen() {
   function handleCurrentWeightChange(value: number) {
     const nextValue = clamp(value, 0, 60);
     setCurrentWeightValue(nextValue);
+    setShowWeightAppliedHint(true);
     setFlowState((current) =>
       current ? updateCurrentSetWeight(current, nextValue) : current,
     );
   }
 
   function handleCurrentRestChange(value: number) {
-    const nextValue = clamp(value, 0, 300);
+    const nextValue = clamp(value, 0, maxEditableRestSeconds);
     setCurrentRestValue(nextValue);
     setFlowState((current) =>
       current ? updateCurrentSetRest(current, nextValue) : current,
@@ -1124,20 +1193,16 @@ export default function SessionScreen() {
     const nextState = saveSet(flowState, {
       reps: currentSet.metricType === "reps" ? mainValue : null,
       durationSec: currentSet.metricType === "duration" ? mainValue : null,
+      weightKg: currentWeightValue,
       feeling: null,
     });
 
     const now = Date.now();
 
     if (isFinalSet) {
-      const nextInSetState: SessionFlowState = {
-        ...nextState,
-        phase: "in_set",
-      };
-
-      setFlowState(nextInSetState);
-      setRestStartTimeMs(null);
-      setRestDurationTargetSec(null);
+      setFlowState(nextState);
+      setRestStartTimeMs(now);
+      setRestDurationTargetSec(currentSet.rest.targetSec ?? 0);
       setRestEndTimeMs(null);
       setNowMs(now);
       setIsFinalFeelingOverlay(true);
@@ -1147,7 +1212,12 @@ export default function SessionScreen() {
       hasPlayedRestCompleteRef.current = false;
       setShowFeelingOverlay(true);
       if (session) {
-        const bundle = getActiveSessionBundle(session, nextInSetState, null, null);
+        const bundle = getActiveSessionBundle(
+          session,
+          nextState,
+          now,
+          currentSet.rest.targetSec ?? 0,
+        );
 
         if (bundle) {
           void saveActiveSession(bundle);
@@ -1156,7 +1226,7 @@ export default function SessionScreen() {
       return;
     }
 
-    const restDurationSec = clamp(currentRestValue, 0, 300);
+    const restDurationSec = clamp(currentRestValue, 0, maxEditableRestSeconds);
     const nextRestEndTimeMs = now + restDurationSec * 1000;
 
     setFlowState(nextState);
@@ -1253,8 +1323,12 @@ export default function SessionScreen() {
       restStartTimeMs == null ? 0 : Math.max(0, Math.round((now - restStartTimeMs) / 1000));
     const currentDurationSec = restDurationTargetSec ?? currentRestValue;
     const currentRemainingSec = Math.max(0, currentDurationSec - elapsedRestSec);
-    const nextRemainingSec = clamp(updater(currentRemainingSec), 0, 300);
-    const nextDurationTargetSec = clamp(elapsedRestSec + nextRemainingSec, 0, 300);
+    const nextRemainingSec = clamp(updater(currentRemainingSec), 0, maxEditableRestSeconds);
+    const nextDurationTargetSec = clamp(
+      elapsedRestSec + nextRemainingSec,
+      0,
+      maxEditableRestSeconds,
+    );
     const nextRestEndTimeMs = (restStartTimeMs ?? now) + nextDurationTargetSec * 1000;
 
     setRestDurationTargetSec(nextDurationTargetSec);
@@ -1447,21 +1521,82 @@ export default function SessionScreen() {
     currentSet.metricType === "reps"
       ? createNumberRange(0, 30)
       : createNumberRange(0, 300);
-  const nextExerciseLabel = upcomingExercise
+  const shortSetTarget = formatShortSetTarget({
+    metricType: currentSet.metricType,
+    targetRepsMin: currentExercise.targetRepsMin,
+    targetRepsMax: currentExercise.targetRepsMax,
+    targetDurationSec: currentExercise.targetDurationSec,
+  });
+  const currentWeightLabel = formatWeightLabel(currentSet.plan.weightKg);
+  const currentRestLabel = formatCountdown(currentSet.rest.targetSec ?? 0);
+  const nextStepLabel = upcomingExercise
     ? upcomingExercise.id === currentExercise.id
-      ? `Next: ${getExerciseDisplayName(upcomingExercise.exerciseId)}`
-      : `Next exercise: ${getExerciseDisplayName(upcomingExercise.exerciseId)}`
-    : "Next: Finish workout";
+      ? `${exerciseName} ${upcomingSet?.setNumber ?? currentSet.setNumber + 1}/${totalSets}`
+      : getExerciseDisplayName(upcomingExercise.exerciseId)
+    : "Finish";
+  const restStateLabel = upcomingExercise?.id === currentExercise.id ? "REST" : "BETWEEN EXERCISES";
+  const restSummaryLabel = upcomingExercise
+    ? upcomingExercise.id === currentExercise.id
+      ? `${exerciseName} ${(upcomingSet?.setNumber ?? currentSet.setNumber + 1)}/${totalSets}`
+      : getExerciseDisplayName(upcomingExercise.exerciseId)
+    : "Finish";
   const nextTransitionLabel = upcomingExercise
     ? getExerciseDisplayName(upcomingExercise.exerciseId)
     : "Finish";
+  const currentExerciseSets = getExerciseSetsForSessionExercise(
+    flowState.workoutSets,
+    currentExercise.id,
+  ).map((set) =>
+    set.id === currentSet.id
+      ? {
+          ...set,
+          plan: {
+            ...set.plan,
+            repsMax: currentSet.metricType === "reps" ? mainValue : set.plan.repsMax,
+            repsMin: currentSet.metricType === "reps" ? mainValue : set.plan.repsMin,
+            durationSec:
+              currentSet.metricType === "duration" ? mainValue : set.plan.durationSec,
+            weightKg: currentWeightValue === 0 ? null : currentWeightValue,
+            restSec: currentRestValue,
+          },
+          performed: {
+            ...set.performed,
+            reps: currentSet.metricType === "reps" ? mainValue : set.performed.reps,
+            durationSec:
+              currentSet.metricType === "duration" ? mainValue : set.performed.durationSec,
+            weightKg: currentWeightValue === 0 ? null : currentWeightValue,
+          },
+          rest: {
+            ...set.rest,
+            targetSec: currentRestValue,
+          },
+        }
+      : set,
+  );
+  const currentExerciseComparison = buildExerciseComparisonSummary(currentExerciseSets);
+  const activeSessionStartMs = new Date(session?.startedAt ?? Date.now()).getTime();
+  const previousExerciseComparison = findLastPreviousExerciseSummary(
+    historyBundles,
+    currentExercise.exerciseId,
+    {
+      beforeTimeMs: activeSessionStartMs,
+      excludeSessionId: session?.id ?? null,
+    },
+  );
 
-  if (isRestPhase(flowState.phase)) {
+  if (isRestPhase(flowState.phase) && !isFinalFeelingOverlay) {
     return (
       <View style={styles.container}>
-          <View style={styles.restScreen}>
+        <View style={styles.restScreen}>
           <View style={[styles.topBar, { paddingTop: insets.top + 12 }]}>
-            <Text style={styles.topBarText}>{nextExerciseLabel}</Text>
+            <View style={styles.topBarHeaderRow}>
+              <Text style={styles.phaseEyebrow}>{restStateLabel}</Text>
+              <Pressable style={styles.topBarUtilityButton} onPress={handleFinishEarly}>
+                <Text style={styles.headerUtilityText}>Finish early</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.topBarHeadline}>{restSummaryLabel}</Text>
+            <Text style={styles.topBarText}>{nextStepLabel}</Text>
           </View>
 
           <View style={styles.restCenter}>
@@ -1470,6 +1605,7 @@ export default function SessionScreen() {
             <View style={styles.countdownBlock}>
               <Text style={styles.countdownText}>{formatCountdown(remainingRestSec)}</Text>
             </View>
+            <Text style={styles.restHint}>{currentRestLabel}</Text>
 
             <View style={styles.timerControlsRow}>
               <Pressable style={styles.timerControl} onPress={handleReduceRestTime}>
@@ -1494,12 +1630,8 @@ export default function SessionScreen() {
             </View>
           </View>
 
-          <Pressable style={styles.secondaryAction} onPress={handleFinishEarly}>
-            <Text style={styles.secondaryActionText}>Finish early</Text>
-          </Pressable>
-
           <Pressable style={styles.skipBar} onPress={handleAdvanceRest}>
-            <Text style={styles.skipBarText}>SKIP</Text>
+            <Text style={styles.skipBarText}>Start next set</Text>
           </Pressable>
         </View>
 
@@ -1586,30 +1718,68 @@ export default function SessionScreen() {
       <View style={styles.topSection}>
         <View style={styles.headerRow}>
           <View style={styles.headerCopy}>
-            <View style={styles.titleRow}>
-              <Text style={styles.title}>{exerciseName}</Text>
-              <Text style={styles.subtitle}>
-                {currentSet.setNumber}/{totalSets}
-              </Text>
-            </View>
+            <Text style={styles.phaseEyebrow}>IN SET</Text>
           </View>
           <Pressable style={styles.headerUtilityButton} onPress={handleFinishEarly}>
             <Text style={styles.headerUtilityText}>Finish early</Text>
           </Pressable>
         </View>
-        <Text style={styles.sessionTimer}>Time {sessionDuration}</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>{exerciseName}</Text>
+          <Text style={styles.subtitle}>
+            {currentSet.setNumber}/{totalSets}
+          </Text>
+        </View>
+        <Text style={styles.sessionTimer}>{sessionDuration}</Text>
+        <View style={styles.setMetaRow}>
+          {shortSetTarget ? <Text style={styles.setMetaText}>{shortSetTarget}</Text> : null}
+          <Text style={styles.setMetaText}>{currentWeightLabel}</Text>
+          <Text style={styles.setMetaText}>{currentRestLabel}</Text>
+        </View>
+        <View style={styles.exerciseComparisonCard}>
+          {previousExerciseComparison && currentExerciseComparison ? (
+            <>
+              <Text style={styles.exerciseComparisonLast}>
+                Last: {previousExerciseComparison.summaryText}
+              </Text>
+              <View style={styles.exerciseComparisonMetaRow}>
+                <Text style={styles.exerciseComparisonMetaText}>
+                  {currentExerciseComparison.primaryLabel}:{" "}
+                  {getComparisonIndicator(
+                    currentExerciseComparison.primaryTotal,
+                    previousExerciseComparison.primaryTotal,
+                  )}
+                </Text>
+                <Text style={styles.exerciseComparisonMetaText}>
+                  Weight:{" "}
+                  {getComparisonIndicator(
+                    currentExerciseComparison.maxWeight,
+                    previousExerciseComparison.maxWeight,
+                  )}
+                </Text>
+              </View>
+            </>
+          ) : (
+            <Text style={styles.exerciseComparisonNew}>New</Text>
+          )}
+        </View>
 
         <View style={styles.topWheelRow}>
           <WheelNumberControl
+            key={`${currentSet.id}_weight`}
             label="Weight"
             value={currentWeightValue}
             options={createNumberRange(0, 60)}
             onChange={handleCurrentWeightChange}
           />
         </View>
+        {showWeightAppliedHint ? (
+          <Text style={styles.inlineHint}>Applied to remaining sets</Text>
+        ) : null}
 
         <RestWheelControl
-          label="Rest"
+          controlKeyPrefix={currentSet.id}
+          label="REST"
           totalSeconds={currentRestValue}
           onChange={handleCurrentRestChange}
         />
@@ -1617,6 +1787,7 @@ export default function SessionScreen() {
 
       <View style={styles.centerSection}>
         <WheelNumberControl
+          key={`${currentSet.id}_${mainLabel.toLowerCase()}`}
           label={mainLabel}
           value={mainValue}
           options={mainOptions}
@@ -1671,7 +1842,7 @@ const styles = StyleSheet.create({
   },
   topSection: {
     paddingTop: 34,
-    paddingBottom: 4,
+    paddingBottom: 0,
   },
   headerRow: {
     flexDirection: "row",
@@ -1692,7 +1863,7 @@ const styles = StyleSheet.create({
   centerSection: {
     flex: 1,
     justifyContent: "center",
-    paddingVertical: 8,
+    paddingVertical: 20,
   },
   bottomSection: {
     marginHorizontal: -20,
@@ -1704,19 +1875,25 @@ const styles = StyleSheet.create({
     color: AppColors.text,
     letterSpacing: -0.6,
   },
+  phaseEyebrow: {
+    fontSize: 11,
+    color: AppColors.mutedText,
+    letterSpacing: 1.2,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
   subtitle: {
     fontSize: 24,
     color: AppColors.mutedText,
     fontWeight: "700",
   },
   sessionTimer: {
-    fontSize: 20,
+    fontSize: 14,
     color: AppColors.mutedText,
-    marginTop: 10,
-    marginBottom: 12,
+    marginTop: 8,
+    marginBottom: 6,
   },
   headerUtilityButton: {
-    marginTop: 12,
     marginLeft: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -1730,7 +1907,55 @@ const styles = StyleSheet.create({
   topWheelRow: {
     flexDirection: "row",
     gap: 12,
+    marginBottom: 4,
+  },
+  setMetaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 12,
     marginBottom: 10,
+  },
+  setMetaText: {
+    fontSize: 12,
+    color: AppColors.mutedText,
+    fontWeight: "500",
+  },
+  inlineHint: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: AppColors.mutedText,
+    marginBottom: 8,
+  },
+  exerciseComparisonCard: {
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.background,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+    marginBottom: 12,
+  },
+  exerciseComparisonLast: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: AppColors.text,
+    fontWeight: "600",
+  },
+  exerciseComparisonMetaRow: {
+    flexDirection: "row",
+    gap: 16,
+    flexWrap: "wrap",
+  },
+  exerciseComparisonMetaText: {
+    fontSize: 12,
+    color: AppColors.mutedText,
+    fontWeight: "700",
+  },
+  exerciseComparisonNew: {
+    fontSize: 13,
+    color: AppColors.mutedText,
+    fontWeight: "700",
   },
   smallWheelContainer: {
     flex: 1,
@@ -1851,11 +2076,30 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: AppColors.border,
   },
+  topBarHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 4,
+  },
+  topBarUtilityButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: AppColors.text,
+  },
   topBarText: {
     color: AppColors.text,
-    fontSize: 14,
+    fontSize: 13,
     textAlign: "center",
-    fontWeight: "600",
+    fontWeight: "500",
+  },
+  topBarHeadline: {
+    color: AppColors.text,
+    fontSize: 22,
+    textAlign: "center",
+    fontWeight: "700",
+    marginBottom: 2,
   },
   restCenter: {
     alignItems: "center",
@@ -1883,6 +2127,11 @@ const styles = StyleSheet.create({
     lineHeight: 96,
     textAlign: "center",
     color: AppColors.text,
+  },
+  restHint: {
+    fontSize: 12,
+    color: AppColors.mutedText,
+    textAlign: "center",
   },
   timerControlsRow: {
     flexDirection: "row",
@@ -1925,18 +2174,9 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     marginHorizontal: -20,
   },
-  secondaryAction: {
-    alignItems: "center",
-    paddingVertical: 12,
-  },
   primaryButtonText: {
     color: AppColors.accentText,
     fontSize: 20,
-    fontWeight: "600",
-  },
-  secondaryActionText: {
-    fontSize: 13,
-    color: AppColors.mutedText,
     fontWeight: "600",
   },
   overlay: {

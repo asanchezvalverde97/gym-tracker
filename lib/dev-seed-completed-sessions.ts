@@ -1,5 +1,9 @@
 import { exercises } from "../data/exercises";
-import { replaceSavedSessions, type SavedSessionBundle } from "./completed-sessions";
+import {
+  getSavedSessions,
+  replaceSavedSessions,
+  type SavedSessionBundle,
+} from "./completed-sessions";
 import type {
   CompletedWorkoutSession,
   Exercise,
@@ -23,6 +27,28 @@ type SeedSessionTemplate = {
   feeling?: 1 | 2 | 3 | 4 | null;
   notes?: string | null;
   exercises: SeedExercise[];
+};
+
+type ImportSet = {
+  reps: number;
+  weightKg: number | null;
+};
+
+type ImportExercise = {
+  name: string;
+  restSec: number | null;
+  variant?: SetVariant;
+  sets: ImportSet[];
+};
+
+type ImportSessionTemplate = {
+  id: string;
+  routineId: string;
+  name: string;
+  date: string;
+  durationMin: number;
+  notes?: string | null;
+  exercises: ImportExercise[];
 };
 
 const exerciseNameMap: Record<string, string> = {
@@ -441,6 +467,109 @@ const weeklyTemplates: SeedSessionTemplate[][] = [
   ],
 ];
 
+const importedPastSessions: ImportSessionTemplate[] = [
+  {
+    id: "import_2026_04_06_espalda_biceps",
+    routineId: "rt_espalda_biceps",
+    name: "espalda_biceps",
+    date: "2026-04-06",
+    durationMin: 45,
+    notes: "chin_ups: assisted",
+    exercises: [
+      {
+        name: "dominadas",
+        restSec: 210,
+        sets: [
+          { weightKg: null, reps: 6 },
+          { weightKg: null, reps: 5 },
+          { weightKg: null, reps: 4 },
+        ],
+      },
+      {
+        name: "remo_mancuerna",
+        restSec: 150,
+        sets: [
+          { weightKg: 18, reps: 10 },
+          { weightKg: 18, reps: 8 },
+          { weightKg: 18, reps: 8 },
+        ],
+      },
+      {
+        name: "chin_ups",
+        restSec: 120,
+        variant: "assisted",
+        sets: [
+          { weightKg: null, reps: 5 },
+          { weightKg: null, reps: 5 },
+          { weightKg: null, reps: 5 },
+        ],
+      },
+    ],
+  },
+  {
+    id: "import_2026_04_07_pecho_triceps",
+    routineId: "rt_pecho_triceps",
+    name: "pecho_triceps",
+    date: "2026-04-07",
+    durationMin: 30,
+    exercises: [
+      {
+        name: "fondos",
+        restSec: 180,
+        sets: [
+          { weightKg: null, reps: 6 },
+          { weightKg: null, reps: 6 },
+          { weightKg: null, reps: 5 },
+        ],
+      },
+      {
+        name: "flexiones",
+        restSec: 150,
+        sets: [
+          { weightKg: null, reps: 15 },
+          { weightKg: null, reps: 12 },
+          { weightKg: null, reps: 11 },
+        ],
+      },
+      {
+        name: "flexiones_cerradas",
+        restSec: 120,
+        sets: [
+          { weightKg: null, reps: 8 },
+          { weightKg: null, reps: 6 },
+        ],
+      },
+    ],
+  },
+  {
+    id: "import_2026_04_09_pierna",
+    routineId: "rt_pierna",
+    name: "pierna",
+    date: "2026-04-09",
+    durationMin: 20,
+    exercises: [
+      {
+        name: "goblet_squat",
+        restSec: 180,
+        sets: [
+          { weightKg: 22, reps: 12 },
+          { weightKg: 22, reps: 14 },
+          { weightKg: 22, reps: 13 },
+        ],
+      },
+      {
+        name: "bulgaras",
+        restSec: 150,
+        sets: [
+          { weightKg: 22, reps: 10 },
+          { weightKg: 22, reps: 10 },
+          { weightKg: 22, reps: 10 },
+        ],
+      },
+    ],
+  },
+];
+
 function getExerciseBySeedName(name: string): Exercise | null {
   const resolvedName = exerciseNameMap[name] ?? name;
   return exercises.find((exercise) => exercise.name === resolvedName) ?? null;
@@ -487,12 +616,6 @@ function createCompletedSet(
     completedAt,
     skippedAt: null,
     variant,
-    reps: metricType === "reps" ? value : null,
-    durationSec: metricType === "duration" ? value : null,
-    weightKg,
-    restSecTarget,
-    restSecActual: restSecTarget,
-    feeling: null,
   };
 }
 
@@ -650,4 +773,116 @@ export async function seedCompletedSessions(): Promise<void> {
 
 export async function clearSeededCompletedSessions(): Promise<void> {
   await replaceSavedSessions([]);
+}
+
+function buildImportedBundle(template: ImportSessionTemplate): SavedSessionBundle {
+  const startedAt = new Date(`${template.date}T18:00:00.000Z`);
+  const endedAt = new Date(startedAt.getTime() + template.durationMin * 60 * 1000);
+
+  const sessionExercises: SessionExercise[] = [];
+  const workoutSets: WorkoutSet[] = [];
+
+  template.exercises.forEach((importExercise, exerciseIndex) => {
+    const exercise = getExerciseBySeedName(importExercise.name);
+
+    if (!exercise) {
+      return;
+    }
+
+    const sessionExerciseId = `import_se_${template.id}_${exerciseIndex + 1}`;
+    const repsValues = importExercise.sets.map((set) => set.reps);
+    const defaultWeightKg =
+      importExercise.sets.find((set) => set.weightKg != null)?.weightKg ?? null;
+
+    sessionExercises.push({
+      id: sessionExerciseId,
+      sessionId: template.id,
+      exerciseId: exercise.id,
+      order: exerciseIndex + 1,
+      targetSets: importExercise.sets.length,
+      targetRepsMin: Math.min(...repsValues),
+      targetRepsMax: Math.max(...repsValues),
+      targetDurationSec: null,
+      defaultWeightKg,
+      defaultRestSec: importExercise.restSec,
+    });
+
+    importExercise.sets.forEach((set, setIndex) => {
+      const completedAt = new Date(
+        startedAt.getTime() +
+          (exerciseIndex * 8 + setIndex * 4 + 4) * 60 * 1000,
+      ).toISOString();
+
+      workoutSets.push({
+        id: `import_ws_${template.id}_${exerciseIndex + 1}_${setIndex + 1}`,
+        sessionExerciseId,
+        setNumber: setIndex + 1,
+        metricType: "reps",
+        status: "completed",
+        plan: {
+          repsMin: set.reps,
+          repsMax: set.reps,
+          durationSec: null,
+          weightKg: set.weightKg,
+          restSec: importExercise.restSec,
+          variant: importExercise.variant ?? "normal",
+        },
+        performed: {
+          reps: set.reps,
+          durationSec: null,
+          weightKg: set.weightKg,
+          feeling: null,
+        },
+        rest: {
+          targetSec: importExercise.restSec,
+          actualSec: importExercise.restSec,
+          startedAt: completedAt,
+          endedAt: completedAt,
+        },
+        createdAt: startedAt.toISOString(),
+        completedAt,
+        skippedAt: null,
+        variant: importExercise.variant ?? "normal",
+      });
+    });
+  });
+
+  return {
+    kind: "completed_session",
+    session: {
+      id: template.id,
+      kind: "completed",
+      routineId: template.routineId,
+      name: template.name,
+      startedAt: startedAt.toISOString(),
+      endedAt: endedAt.toISOString(),
+      bodyweightKg: null,
+      feeling: null,
+      notes: template.notes ?? null,
+      createdAt: startedAt.toISOString(),
+    },
+    sessionExercises,
+    workoutSets,
+  };
+}
+
+export async function importPastCompletedSessions(): Promise<void> {
+  const existingBundles = await getSavedSessions();
+  const existingIds = new Set(existingBundles.map((bundle) => bundle.session.id));
+  const nextImportedBundles = importedPastSessions
+    .filter((template) => !existingIds.has(template.id))
+    .map(buildImportedBundle);
+
+  if (nextImportedBundles.length === 0) {
+    return;
+  }
+
+  await replaceSavedSessions(
+    [...existingBundles, ...nextImportedBundles].sort((a, b) => {
+      const aTime = new Date(a.session.endedAt ?? a.session.startedAt).getTime();
+      const bTime = new Date(b.session.endedAt ?? b.session.startedAt).getTime();
+
+      return bTime - aTime;
+    }),
+  );
 }

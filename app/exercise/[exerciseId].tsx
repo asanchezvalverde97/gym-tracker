@@ -116,7 +116,7 @@ function getExerciseSummary(
 
   if (sets[0].metricType === "duration") {
     const durations = sets
-      .map((set) => set.durationSec ?? null)
+      .map((set) => set.performed.durationSec ?? null)
       .filter((value): value is number => value != null && Number.isFinite(value));
 
     if (durations.length === 0) {
@@ -134,7 +134,7 @@ function getExerciseSummary(
   }
 
   const reps = sets
-    .map((set) => set.reps ?? null)
+    .map((set) => set.performed.reps ?? null)
     .filter((value): value is number => value != null && Number.isFinite(value));
 
   if (reps.length === 0) {
@@ -155,16 +155,16 @@ function getExerciseSummary(
   }
 
   const weightValues = sets
-    .map((set) => set.weightKg ?? null)
+    .map((set) => set.performed.weightKg ?? null)
     .filter((value): value is number => value != null && Number.isFinite(value));
 
   if (weightValues.length > 0) {
     const weightedSets = sets.filter(
       (set) =>
-        set.weightKg != null &&
-        set.reps != null &&
-        Number.isFinite(set.weightKg) &&
-        Number.isFinite(set.reps),
+        set.performed.weightKg != null &&
+        set.performed.reps != null &&
+        Number.isFinite(set.performed.weightKg) &&
+        Number.isFinite(set.performed.reps),
     );
     const bestRepCount = Math.max(...reps);
     const uniqueWeights = Array.from(new Set(weightValues.map((value) => Math.round(value))));
@@ -176,8 +176,8 @@ function getExerciseSummary(
       bestSet: bestRepCount,
       bestSetWeightKg: Math.max(
         ...weightedSets
-          .filter((set) => (set.reps ?? 0) === bestRepCount)
-          .map((set) => set.weightKg ?? 0),
+          .filter((set) => (set.performed.reps ?? 0) === bestRepCount)
+          .map((set) => set.performed.weightKg ?? 0),
       ),
       mainDisplay: `${weightDisplay} · ${reps.join("/")}`,
       referenceWeightKg: weightValues.reduce((total, value) => total + value, 0) / weightValues.length,

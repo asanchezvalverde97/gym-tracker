@@ -198,7 +198,21 @@ export function HistoryScreenContent({
       ]}
       showsVerticalScrollIndicator={false}
     >
-      {!embedded ? <Text style={styles.title}>Completed sessions</Text> : null}
+      {!embedded ? (
+        <View style={styles.headerSection}>
+          <Text style={styles.title}>Completed sessions</Text>
+          <Pressable
+            style={styles.addPastButton}
+            onPress={() => router.push("/add-past-session")}
+          >
+            <Text style={styles.addPastButtonEyebrow}>History</Text>
+            <Text style={styles.addPastButtonText}>Add past session</Text>
+            <Text style={styles.addPastButtonHint}>
+              Backfill a completed workout from an earlier date.
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {sessions.length === 0 ? (
         <Text style={styles.emptyText}>No completed sessions yet.</Text>
@@ -279,7 +293,35 @@ const styles = StyleSheet.create({
     fontSize: 34,
     fontWeight: "700",
     color: AppColors.text,
+  },
+  headerSection: {
+    gap: 14,
     marginBottom: 18,
+  },
+  addPastButton: {
+    borderWidth: 1,
+    borderColor: AppColors.accent,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: AppColors.surface,
+    gap: 4,
+  },
+  addPastButtonEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+    color: AppColors.accent,
+  },
+  addPastButtonText: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: AppColors.text,
+  },
+  addPastButtonHint: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: AppColors.mutedText,
   },
   list: {
     gap: 0,

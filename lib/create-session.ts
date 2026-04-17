@@ -94,12 +94,6 @@ function createWorkoutSets(
     },
     createdAt: nowIso,
     variant,
-    reps: null,
-    durationSec: null,
-    weightKg: routineExercise.defaultWeightKg ?? null,
-    restSecTarget: routineExercise.defaultRestSec ?? null,
-    restSecActual: null,
-    feeling: null,
     completedAt: null,
     skippedAt: null,
   }));

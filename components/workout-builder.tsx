@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
   Pressable,
   ScrollView,
@@ -12,33 +12,21 @@ import { Feather } from "@expo/vector-icons";
 import { AppColors } from "../constants/ui";
 import { exercises } from "../data/exercises";
 import { getExerciseDisplayName } from "../lib/display-name";
+import {
+  fromRestParts,
+  toRestParts,
+} from "../lib/rest-time";
 import { createRoutineExercise } from "../lib/routine-bundle";
 import type { RoutineBundle } from "../lib/routines-storage";
 import type { Exercise, RoutineExercise, SetVariant } from "../types/workout";
-import { MiniWheelControl } from "./mini-wheel-control";
 
-function createNumberRange(min: number, max: number, step = 1): number[] {
-  return Array.from(
-    { length: Math.floor((max - min) / step) + 1 },
-    (_, index) => min + index * step,
-  );
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-const restSecondsOptions = Array.from({ length: 12 }, (_, index) => index * 5);
-
-function toRestParts(totalSeconds: number): { minutes: number; seconds: number } {
-  const clamped = Math.max(0, Math.min(300, Math.round(totalSeconds)));
-  const snappedTotalSeconds = Math.round(clamped / 5) * 5;
-  const safe = Math.max(0, Math.min(300, snappedTotalSeconds));
-
-  return {
-    minutes: Math.floor(safe / 60),
-    seconds: safe % 60,
-  };
-}
-
-function fromRestParts(minutes: number, seconds: number): number {
-  return Math.max(0, Math.min(300, minutes * 60 + seconds));
+function snapToStep(value: number, min: number, max: number, step: number): number {
+  const normalized = Math.round((value - min) / step) * step + min;
+  return clamp(normalized, min, max);
 }
 
 function formatExerciseDetails(exercise: RoutineExercise): string {
@@ -61,40 +49,133 @@ function formatExerciseDetails(exercise: RoutineExercise): string {
   return parts.join(" · ");
 }
 
-function BuilderRestWheelControl({
+function StepperInput({
+  label,
   value,
+  min,
+  max,
+  step,
   onChange,
+  formatValue,
 }: {
+  label: string;
   value: number;
+  min: number;
+  max: number;
+  step: number;
   onChange: (value: number) => void;
+  formatValue?: (value: number) => string;
 }) {
-  const { minutes, seconds } = toRestParts(value);
-  const secondsOptions = minutes >= 5 ? [0] : restSecondsOptions;
+  const [isEditing, setIsEditing] = useState(false);
+  const [inputValue, setInputValue] = useState(String(value));
 
-  function handleMinutesChange(minutes: number) {
-    onChange(fromRestParts(minutes, minutes >= 5 ? 0 : seconds));
+  useEffect(() => {
+    if (!isEditing) {
+      setInputValue(String(value));
+    }
+  }, [isEditing, value]);
+
+  function commitValue(rawValue: string) {
+    const parsed = Number.parseInt(rawValue, 10);
+    const nextValue = Number.isFinite(parsed)
+      ? snapToStep(parsed, min, max, step)
+      : value;
+
+    setInputValue(String(nextValue));
+    setIsEditing(false);
+    onChange(nextValue);
   }
 
-  function handleSecondsChange(seconds: number) {
-    onChange(fromRestParts(minutes, seconds));
-  }
+  const displayValue = formatValue ? formatValue(value) : String(value);
 
   return (
-    <>
-      <MiniWheelControl
+    <View style={styles.stepperField}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <View style={styles.stepperRow}>
+        <Pressable
+          style={styles.stepperButton}
+          onPress={() => onChange(clamp(value - step, min, max))}
+        >
+          <Text style={styles.stepperButtonText}>-</Text>
+        </Pressable>
+        {isEditing ? (
+          <TextInput
+            style={styles.stepperInput}
+            value={inputValue}
+            onChangeText={setInputValue}
+            onBlur={() => commitValue(inputValue)}
+            onSubmitEditing={() => commitValue(inputValue)}
+            keyboardType="number-pad"
+            autoFocus
+            selectTextOnFocus
+            returnKeyType="done"
+          />
+        ) : (
+          <Pressable style={styles.stepperValueButton} onPress={() => setIsEditing(true)}>
+            <Text style={styles.stepperValueText}>{displayValue}</Text>
+          </Pressable>
+        )}
+        <Pressable
+          style={styles.stepperButton}
+          onPress={() => onChange(clamp(value + step, min, max))}
+        >
+          <Text style={styles.stepperButtonText}>+</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function RestInput({
+  value,
+  onMinutesChange,
+  onSecondsChange,
+}: {
+  value: number;
+  onMinutesChange: (minutes: number) => void;
+  onSecondsChange: (seconds: number) => void;
+}) {
+  const { minutes, seconds } = toRestParts(value);
+
+  return (
+    <View style={styles.restField}>
+      <StepperInput
         label="Rest min"
         value={minutes}
-        options={createNumberRange(0, 5)}
-        onChange={handleMinutesChange}
+        min={0}
+        max={5}
+        step={1}
+        onChange={onMinutesChange}
       />
-      <MiniWheelControl
-        label="Rest sec"
-        value={seconds}
-        options={secondsOptions}
-        onChange={handleSecondsChange}
-        formatValue={(seconds) => String(seconds).padStart(2, "0")}
-      />
-    </>
+      <View style={styles.restSecondsField}>
+        <Text style={styles.fieldLabel}>Rest sec</Text>
+        <View style={styles.restSecondsRow}>
+          {[0, 30].map((option) => {
+            const isSelected = seconds === option;
+
+            return (
+              <Pressable
+                key={option}
+                style={[
+                  styles.restSecondsButton,
+                  isSelected && styles.restSecondsButtonSelected,
+                ]}
+                onPress={() => onSecondsChange(option)}
+              >
+                <Text
+                  style={[
+                    styles.restSecondsButtonText,
+                    isSelected && styles.restSecondsButtonTextSelected,
+                  ]}
+                >
+                  {String(option).padStart(2, "0")}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -103,6 +184,7 @@ export function WorkoutBuilder({
   title,
   kicker,
   nameLabel,
+  headerContent,
   allowRename = false,
   primaryActionLabel,
   onPrimaryAction,
@@ -115,6 +197,7 @@ export function WorkoutBuilder({
   title: string;
   kicker: string;
   nameLabel: string;
+  headerContent?: ReactNode;
   allowRename?: boolean;
   primaryActionLabel: string;
   onPrimaryAction: () => void;
@@ -257,6 +340,8 @@ export function WorkoutBuilder({
           </View>
         ) : null}
 
+        {headerContent ? <View style={styles.headerContent}>{headerContent}</View> : null}
+
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Exercises</Text>
           <Text style={styles.sectionMeta}>{bundle.routineExercises.length} selected</Text>
@@ -316,11 +401,13 @@ export function WorkoutBuilder({
                   </View>
                 </View>
 
-                <View style={styles.wheelRow}>
-                  <MiniWheelControl
+                <View style={styles.controlsRow}>
+                  <StepperInput
                     label="Sets"
                     value={routineExercise.targetSets}
-                    options={createNumberRange(1, 8)}
+                    min={1}
+                    max={8}
+                    step={1}
                     onChange={(value) =>
                       updateExercise(routineExercise.id, (current) => ({
                         ...current,
@@ -329,10 +416,12 @@ export function WorkoutBuilder({
                     }
                   />
                   {isRepsExercise ? (
-                    <MiniWheelControl
+                    <StepperInput
                       label="Reps"
                       value={routineExercise.targetReps ?? 8}
-                      options={createNumberRange(1, 25)}
+                      min={1}
+                      max={30}
+                      step={1}
                       onChange={(value) =>
                         updateExercise(routineExercise.id, (current) => ({
                           ...current,
@@ -342,10 +431,12 @@ export function WorkoutBuilder({
                       }
                     />
                   ) : (
-                    <MiniWheelControl
+                    <StepperInput
                       label="Seconds"
                       value={routineExercise.targetDurationSec ?? 30}
-                      options={createNumberRange(5, 180, 5)}
+                      min={5}
+                      max={180}
+                      step={5}
                       onChange={(value) =>
                         updateExercise(routineExercise.id, (current) => ({
                           ...current,
@@ -355,29 +446,46 @@ export function WorkoutBuilder({
                       }
                     />
                   )}
-                  <BuilderRestWheelControl
+                </View>
+
+                <View style={styles.restRow}>
+                  <RestInput
                     value={routineExercise.defaultRestSec ?? 90}
-                    onChange={(value) =>
+                    onMinutesChange={(minutes) =>
                       updateExercise(routineExercise.id, (current) => ({
                         ...current,
-                        defaultRestSec: value,
+                        defaultRestSec: fromRestParts(
+                          minutes,
+                          toRestParts(current.defaultRestSec ?? 90).seconds,
+                        ),
+                      }))
+                    }
+                    onSecondsChange={(seconds) =>
+                      updateExercise(routineExercise.id, (current) => ({
+                        ...current,
+                        defaultRestSec: fromRestParts(
+                          toRestParts(current.defaultRestSec ?? 90).minutes,
+                          seconds,
+                        ),
                       }))
                     }
                   />
                 </View>
 
                 <View style={styles.detailRow}>
-                  <MiniWheelControl
+                  <StepperInput
                     label="Weight"
                     value={routineExercise.defaultWeightKg ?? 0}
-                    options={createNumberRange(0, 60, 2.5)}
+                    min={0}
+                    max={200}
+                    step={1}
                     onChange={(value) =>
                       updateExercise(routineExercise.id, (current) => ({
                         ...current,
                         defaultWeightKg: value === 0 ? null : value,
                       }))
                     }
-                    formatValue={(value) => (value === 0 ? "BW" : `${value} kg`)}
+                    formatValue={(value) => String(value)}
                   />
 
                   <View style={styles.detailField}>
@@ -494,6 +602,9 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 20,
   },
+  headerContent: {
+    marginBottom: 20,
+  },
   nameInput: {
     borderWidth: 1,
     borderColor: AppColors.border,
@@ -573,7 +684,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  wheelRow: {
+  controlsRow: {
     flexDirection: "row",
     gap: 10,
   },
@@ -581,6 +692,92 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 12,
     alignItems: "flex-start",
+  },
+  restRow: {
+    flexDirection: "row",
+  },
+  stepperField: {
+    flex: 1,
+    gap: 6,
+  },
+  stepperRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  stepperButton: {
+    width: 36,
+    height: 44,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepperButtonText: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: AppColors.text,
+  },
+  stepperValueButton: {
+    flex: 1,
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+  },
+  stepperValueText: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: AppColors.text,
+  },
+  stepperInput: {
+    flex: 1,
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
+    paddingHorizontal: 10,
+    textAlign: "center",
+    fontSize: 18,
+    fontWeight: "700",
+    color: AppColors.text,
+  },
+  restField: {
+    flex: 1,
+    gap: 10,
+  },
+  restSecondsField: {
+    gap: 6,
+  },
+  restSecondsRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  restSecondsButton: {
+    flex: 1,
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  restSecondsButtonSelected: {
+    borderColor: AppColors.accent,
+    backgroundColor: AppColors.accent,
+  },
+  restSecondsButtonText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: AppColors.text,
+  },
+  restSecondsButtonTextSelected: {
+    color: AppColors.accentText,
   },
   detailField: {
     flex: 1,

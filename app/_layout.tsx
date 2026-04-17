@@ -17,9 +17,11 @@ export default function RootLayout() {
         <Stack.Screen name="plan" options={{ headerShown: false }} />
         <Stack.Screen name="exercises" options={{ title: "Exercises" }} />
         <Stack.Screen name="routines" options={{ title: "Routines" }} />
+        <Stack.Screen name="weekly-schedule" options={{ title: "Weekly schedule" }} />
         <Stack.Screen name="settings" options={{ title: "Settings" }} />
         <Stack.Screen name="stats" options={{ title: "Stats" }} />
         <Stack.Screen name="history" options={{ title: "Completed sessions" }} />
+        <Stack.Screen name="add-past-session" options={{ title: "Add past session" }} />
         <Stack.Screen name="history/[sessionId]" options={{ title: "Session details" }} />
         <Stack.Screen name="exercise/[exerciseId]" options={{ title: "Exercise" }} />
         <Stack.Screen name="session" options={{ headerShown: false }} />
